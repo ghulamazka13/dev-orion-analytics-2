@@ -1,0 +1,254 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgduckdb/pgduckdb:16-v1.1.1
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=analytics
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  metadata-redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  risingwave:
+    image: risingwavelabs/risingwave:v1.7.0
+    ports:
+      - "4566:4566"
+    depends_on:
+      - postgres
+
+  risingwave-init:
+    image: postgres:16.3
+    depends_on:
+      risingwave:
+        condition: service_started
+    environment:
+      - RW_KAFKA_BOOTSTRAP=10.110.12.20:9092
+    volumes:
+      - ./risingwave/init_dev.sql:/init_dev.sql:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        until pg_isready -h risingwave -p 4566 -U root; do
+          echo "waiting for risingwave..."
+          sleep 3
+        done
+        if [ -n "$${RW_KAFKA_BOOTSTRAP:-}" ]; then
+          rw_host="$${RW_KAFKA_BOOTSTRAP%:*}"
+          rw_port="$${RW_KAFKA_BOOTSTRAP#*:}"
+          until (echo > /dev/tcp/$${rw_host}/$${rw_port}) >/dev/null 2>&1; do
+            echo "waiting for redpanda..."
+            sleep 3
+          done
+        fi
+        psql -h risingwave -p 4566 -U root -d dev -f /init_dev.sql
+    restart: "no"
+
+  risingwave-backfill:
+    image: postgres:16.3
+    profiles: ["backfill"]
+    depends_on:
+      risingwave:
+        condition: service_started
+    environment:
+      - RW_KAFKA_BOOTSTRAP=10.110.12.20:9092
+      - RW_BACKFILL_TOPIC=raw-security-logs
+      - RW_BACKFILL_DAYS=7
+    volumes:
+      - ./risingwave/backfill.sql:/backfill.sql:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        until pg_isready -h risingwave -p 4566 -U root; do
+          echo "waiting for risingwave..."
+          sleep 3
+        done
+        bootstrap_server="$${RW_KAFKA_BOOTSTRAP:-10.110.12.20:9092}"
+        rw_host="$${bootstrap_server%:*}"
+        rw_port="$${bootstrap_server#*:}"
+        until (echo > /dev/tcp/$${rw_host}/$${rw_port}) >/dev/null 2>&1; do
+          echo "waiting for kafka..."
+          sleep 3
+        done
+        if [ -n "$${RW_BACKFILL_START_TS:-}" ]; then
+          start_ts="$${RW_BACKFILL_START_TS}"
+        else
+          days="$${RW_BACKFILL_DAYS:-7}"
+          start_epoch=$$(( $$(date -u +%s) - (days * 86400) ))
+          start_ts="$$(date -u -d @$${start_epoch} +%Y-%m-%dT%H:%M:%SZ)"
+        fi
+        if [ -n "$${RW_BACKFILL_END_TS:-}" ]; then
+          end_ts="$${RW_BACKFILL_END_TS}"
+        else
+          end_ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        fi
+        topic="$${RW_BACKFILL_TOPIC:-raw-security-logs}"
+        psql -h risingwave -p 4566 -U root -d dev \
+          -v start_ts="$${start_ts}" \
+          -v end_ts="$${end_ts}" \
+          -v topic="$${topic}" \
+          -v bootstrap_server="$${bootstrap_server}" \
+          -f /backfill.sql
+    restart: "no"
+
+  airflow-init:
+    image: apache/airflow:2.9.2-python3.11
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=H8oF2K4U7b8C3jY2nG9YF0pI5J6kT8mP1qR2sX3u4vE=
+      - AIRFLOW__WEBSERVER__SECRET_KEY=airflowsecret
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+      - _AIRFLOW_WWW_USER_FIRSTNAME=Admin
+      - _AIRFLOW_WWW_USER_LASTNAME=User
+      - _AIRFLOW_WWW_USER_EMAIL=azka.ghulam13@gmail.com
+      - PIP_EXTRA_REQUIREMENTS=apache-airflow-providers-postgres==5.11.0 soda-core==3.4.0 soda-core-postgres==3.4.0 redis==5.0.6
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --role Admin \
+          --username "$$_AIRFLOW_WWW_USER_USERNAME" \
+          --password "$$_AIRFLOW_WWW_USER_PASSWORD" \
+          --firstname "$$_AIRFLOW_WWW_USER_FIRSTNAME" \
+          --lastname "$$_AIRFLOW_WWW_USER_LASTNAME" \
+          --email "$$_AIRFLOW_WWW_USER_EMAIL"
+    restart: "no"
+
+  airflow-webserver:
+    image: apache/airflow:2.9.2-python3.11
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8088:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=H8oF2K4U7b8C3jY2nG9YF0pI5J6kT8mP1qR2sX3u4vE=
+      - AIRFLOW__WEBSERVER__SECRET_KEY=airflowsecret
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+      - AIRFLOW_CONN_ANALYTICS_DB=postgresql://etl_runner:etl_runner@postgres:5432/analytics
+      - METADATA_REDIS_HOST=metadata-redis
+      - METADATA_REDIS_PORT=6379
+      - METADATA_REDIS_DB=0
+      - METADATA_REDIS_KEY=pipelines
+      - SODA_POSTGRES_HOST=postgres
+      - SODA_POSTGRES_PORT=5432
+      - SODA_POSTGRES_DB=analytics
+      - SODA_POSTGRES_USERNAME=etl_runner
+      - SODA_POSTGRES_PASSWORD=etl_runner
+      - PIP_EXTRA_REQUIREMENTS=apache-airflow-providers-postgres==5.11.0 soda-core==3.4.0 soda-core-postgres==3.4.0 redis==5.0.6
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.2-python3.11
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=H8oF2K4U7b8C3jY2nG9YF0pI5J6kT8mP1qR2sX3u4vE=
+      - AIRFLOW__WEBSERVER__SECRET_KEY=airflowsecret
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+      - AIRFLOW_CONN_ANALYTICS_DB=postgresql://etl_runner:etl_runner@postgres:5432/analytics
+      - METADATA_REDIS_HOST=metadata-redis
+      - METADATA_REDIS_PORT=6379
+      - METADATA_REDIS_DB=0
+      - METADATA_REDIS_KEY=pipelines
+      - SODA_POSTGRES_HOST=postgres
+      - SODA_POSTGRES_PORT=5432
+      - SODA_POSTGRES_DB=analytics
+      - SODA_POSTGRES_USERNAME=etl_runner
+      - SODA_POSTGRES_PASSWORD=etl_runner
+      - PIP_EXTRA_REQUIREMENTS=apache-airflow-providers-postgres==5.11.0 soda-core==3.4.0 soda-core-postgres==3.4.0 redis==5.0.6
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+    command: scheduler
+
+  superset:
+    image: apache/superset:4.0.1
+    ports:
+      - "8089:8088"
+    environment:
+      - SUPERSET_SECRET_KEY=supersetsecret
+      - SUPERSET_LOAD_EXAMPLES=no
+      - SUPERSET_ENV=production
+      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+      - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+    volumes:
+      - superset_data:/var/lib/superset
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    depends_on:
+      - postgres
+
+  superset-init:
+    image: apache/superset:4.0.1
+    depends_on:
+      - superset
+    environment:
+      - SUPERSET_SECRET_KEY=supersetsecret
+      - SUPERSET_LOAD_EXAMPLES=no
+      - SUPERSET_ENV=production
+      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+      - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+    volumes:
+      - superset_data:/var/lib/superset
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        superset db upgrade
+        superset fab create-admin \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --email azka.ghulam13@gmail.com \
+          --password admin
+        superset init
+    restart: "no"
+
+volumes:
+  postgres_data:
+  superset_data:
