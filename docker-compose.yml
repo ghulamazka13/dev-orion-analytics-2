@@ -214,11 +214,11 @@ services:
       - SUPERSET_SECRET_KEY=supersetsecret
       - SUPERSET_LOAD_EXAMPLES=no
       - SUPERSET_ENV=production
-      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
-      - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////app/superset_home/superset.db
+      - SQLALCHEMY_DATABASE_URI=sqlite:////app/superset_home/superset.db
     volumes:
-      - ./superset_data:/var/lib/superset
-      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - ./superset_data:/app/superset_home
+ #     - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     depends_on:
       - postgres
 
@@ -230,10 +230,10 @@ services:
       - SUPERSET_SECRET_KEY=supersetsecret
       - SUPERSET_LOAD_EXAMPLES=no
       - SUPERSET_ENV=production
-      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
-      - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
+      - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////app/superset_home/superset.db
+      - SQLALCHEMY_DATABASE_URI=sqlite:////app/superset_home/superset.db
     volumes:
-      - ./superset_data:/var/lib/superset
+      - ./superset_data:/app/superset_home
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     entrypoint: /bin/bash
     command:
