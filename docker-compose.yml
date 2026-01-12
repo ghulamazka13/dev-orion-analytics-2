@@ -217,7 +217,7 @@ services:
       - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
       - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
     volumes:
-      - superset_data:/var/lib/superset
+      - ./superset_data:/var/lib/superset
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     depends_on:
       - postgres
@@ -233,7 +233,7 @@ services:
       - SUPERSET_SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
       - SQLALCHEMY_DATABASE_URI=sqlite:////var/lib/superset/superset.db
     volumes:
-      - superset_data:/var/lib/superset
+      - ./superset_data:/var/lib/superset
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     entrypoint: /bin/bash
     command:
@@ -251,4 +251,3 @@ services:
 
 volumes:
   postgres_data:
-  superset_data:
