@@ -1797,6 +1797,7 @@ BEGIN
       p.protocol_key,
       e.event_key,
       z.zeek_uid,
+      z.host_name,
       z.src_ip,
       z.dest_ip,
       z.src_port,
