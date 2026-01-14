@@ -256,6 +256,7 @@ SELECT
   event_module,
   event_provider,
   zeek_uid,
+  host_name,
   sensor_name,
   src_ip,
   dest_ip,
@@ -297,6 +298,16 @@ FROM (
     event->>'module' AS event_module,
     event->>'provider' AS event_provider,
     COALESCE(zeek->>'uid', event->'id'->>0) AS zeek_uid,
+    CASE event->>'dataset'                                                                                        
+    WHEN 'http' THEN NULLIF(zeek->'http'->>'host', '')                                                          
+    WHEN 'dns'  THEN NULLIF(zeek->'dns'->>'query', '')                                                          
+    WHEN 'ssl'  THEN NULLIF(zeek->'ssl'->>'server_name', '')                                                    
+    ELSE COALESCE(                                                                                              
+      NULLIF(zeek->'http'->>'host', ''),                                                                        
+      NULLIF(zeek->'dns'->>'query', ''),
+      NULLIF(zeek->'ssl'->>'server_name', '')                                                                   
+    )                                                                                                           
+  END AS host_name,
     COALESCE(agent->>'name', host->>'name', node) AS sensor_name,
     source->>'ip' AS src_ip,
     destination->>'ip' AS dest_ip,

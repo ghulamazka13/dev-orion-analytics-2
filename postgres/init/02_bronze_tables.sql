@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
   event_module text,
   event_provider text,
   zeek_uid text,
+  host_name text,
   sensor_name text,
   src_ip inet,
   dest_ip inet,
