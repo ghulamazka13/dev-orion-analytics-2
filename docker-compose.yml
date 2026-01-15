@@ -27,6 +27,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+    restart: unless-stopped
 
   risingwave:
     image: risingwavelabs/risingwave:v1.7.0
@@ -34,6 +35,7 @@ services:
       - "4566:4566"
     depends_on:
       - postgres
+    restart: unless-stopped
 
   risingwave-init:
     image: postgres:16.3

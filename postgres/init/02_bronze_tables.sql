@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_wazuh_events_raw_agent_name ON bronze.wazuh_event
 CREATE INDEX IF NOT EXISTS idx_wazuh_events_raw_rule_id ON bronze.wazuh_events_raw(rule_id);
 
 CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
-  event_id text PRIMARY KEY,
+  event_id text,
   event_ts timestamptz,
   event_ingested_ts timestamptz,
   event_start_ts timestamptz,
@@ -90,12 +90,15 @@ CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
   vlan_id text,
   tags jsonb,
   message text,
-  raw_data jsonb
+  raw_data jsonb,
+  row_hash text
 );
 
 CREATE INDEX IF NOT EXISTS idx_zeek_events_raw_event_ts ON bronze.zeek_events_raw(event_ts);
 CREATE INDEX IF NOT EXISTS idx_zeek_events_raw_src_ip ON bronze.zeek_events_raw(src_ip);
 CREATE INDEX IF NOT EXISTS idx_zeek_events_raw_dest_ip ON bronze.zeek_events_raw(dest_ip);
+CREATE INDEX IF NOT EXISTS idx_zeek_events_raw_event_id ON bronze.zeek_events_raw(event_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_zeek_events_raw_row_hash ON bronze.zeek_events_raw(row_hash);
 
 -- RisingWave JDBC sink uses INSERT ... RETURNING, which requires SELECT on target columns.
 GRANT SELECT ON bronze.suricata_events_raw TO rw_writer;

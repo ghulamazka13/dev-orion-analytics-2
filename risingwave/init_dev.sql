@@ -280,7 +280,47 @@ SELECT
   vlan_id,
   tags,
   message,
-  raw_data
+  raw_data,
+  md5(
+    concat_ws(
+      '||',
+      coalesce(event_id, ''),
+      coalesce(event_ts::text, ''),
+      coalesce(event_ingested_ts::text, ''),
+      coalesce(event_start_ts::text, ''),
+      coalesce(event_end_ts::text, ''),
+      coalesce(event_dataset, ''),
+      coalesce(event_kind, ''),
+      coalesce(event_module, ''),
+      coalesce(event_provider, ''),
+      coalesce(zeek_uid, ''),
+      coalesce(host_name, ''),
+      coalesce(sensor_name, ''),
+      coalesce(src_ip::text, ''),
+      coalesce(dest_ip::text, ''),
+      coalesce(src_port::text, ''),
+      coalesce(dest_port::text, ''),
+      coalesce(protocol, ''),
+      coalesce(application, ''),
+      coalesce(network_type, ''),
+      coalesce(direction, ''),
+      coalesce(community_id, ''),
+      coalesce(bytes::text, ''),
+      coalesce(packets::text, ''),
+      coalesce(orig_bytes::text, ''),
+      coalesce(resp_bytes::text, ''),
+      coalesce(orig_pkts::text, ''),
+      coalesce(resp_pkts::text, ''),
+      coalesce(conn_state, ''),
+      coalesce(conn_state_description, ''),
+      coalesce(duration::text, ''),
+      coalesce(history, ''),
+      coalesce(vlan_id, ''),
+      coalesce(tags::text, ''),
+      coalesce(message, ''),
+      coalesce(raw_data::text, '')
+    )
+  ) AS row_hash
 FROM (
   SELECT
     event->>'hash' AS event_id,
@@ -387,5 +427,6 @@ WITH (
   jdbc.url = 'jdbc:postgresql://postgres:5432/analytics?user=rw_writer&password=rw_writer',
   schema.name = 'bronze',
   table.name = 'zeek_events_raw',
-  type = 'append-only'
+  type = 'upsert',
+  primary_key = 'row_hash'
 );
