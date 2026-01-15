@@ -30,7 +30,6 @@ services:
 
   risingwave:
     image: risingwavelabs/risingwave:v1.7.0
-    restart: unless-stopped  
     ports:
       - "4566:4566"
     depends_on:
