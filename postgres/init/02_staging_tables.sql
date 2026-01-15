@@ -28,8 +28,6 @@ CREATE INDEX IF NOT EXISTS idx_staging_zeek_events_backfill_event_id
   ON staging.zeek_events_backfill(event_id);
 CREATE INDEX IF NOT EXISTS idx_staging_zeek_events_backfill_event_ts
   ON staging.zeek_events_backfill(event_ts);
-CREATE INDEX IF NOT EXISTS idx_staging_zeek_events_backfill_row_hash
-  ON staging.zeek_events_backfill(row_hash);
 
 GRANT INSERT ON staging.suricata_events_backfill TO rw_writer;
 GRANT INSERT ON staging.wazuh_events_backfill TO rw_writer;
