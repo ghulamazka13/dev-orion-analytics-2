@@ -34,6 +34,7 @@ services:
       - "4566:4566"
     depends_on:
       - postgres
+    restart: always
 
   risingwave-init:
     image: postgres:16.3
