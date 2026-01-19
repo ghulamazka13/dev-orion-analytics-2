@@ -10,14 +10,14 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=analytics
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_database_backup:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d analytics"]
       interval: 10s
       timeout: 5s
       retries: 10
-
+    restart: always
   metadata-redis:
     image: redis:7.2-alpine
     ports:
@@ -251,4 +251,4 @@ services:
     restart: "no"
 
 volumes:
-  postgres_data:
+  postgres_database_backup:
