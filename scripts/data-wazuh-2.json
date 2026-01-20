@@ -1,0 +1,57 @@
+{
+  "ecs": {
+    "version": "1.6.0"
+  },
+  "log": null,
+  "host": {
+    "ip": "10.110.90.38",
+    "name": "agent7-centos-bash"
+  },
+  "node": "agent7-centos-bash",
+  "rule": {
+    "id": "200178",
+    "name": "Detects suspicious activities as declared by Florian Roth in its 'Best Practice Auditd Configuration'. This includes the detection of the following commands; wget, curl, base64, nc, netcat, ncat, ssh, socat, wireshark, rawshark, rdesktop, nmap.",
+    "level": 12,
+    "ruleset": [
+      "audit",
+      "syscall"
+    ]
+  },
+  "tags": [],
+  "agent": {
+    "ip": "10.110.90.38",
+    "name": "agent7-centos-bash"
+  },
+  "event": {
+    "end": 1767864514640,
+    "hash": "8SQjsWRlaK91JT0oT0QmFw",
+    "kind": "alert",
+    "start": 1767864514640,
+    "module": "audit.log",
+    "dataset": "alert",
+    "ingested": "2026-01-08T09:28:36.229Z",
+    "provider": "wazuh"
+  },
+  "input": null,
+  "length": null,
+  "rootId": null,
+  "message": null,
+  "related": {
+    "ip": [
+      "10.110.90.38"
+    ],
+    "mac": [
+      "bc:24:11:e8:7f:43"
+    ],
+    "hosts": [
+      "agent7-centos-bash"
+    ]
+  },
+  "@version": "1",
+  "timestamp": null,
+  "@timestamp": "2026-01-08T09:28:34.640Z",
+  "ipProtocol": null,
+  "lastPacket": 1767864514640,
+  "firstPacket": 1767864514640,
+  "totDataBytes": null
+}

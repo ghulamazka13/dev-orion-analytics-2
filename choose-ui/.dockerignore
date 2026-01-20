@@ -1,0 +1,50 @@
+# Dependencies
+node_modules
+packages/*/node_modules
+
+# Build outputs (we rebuild in Docker)
+dist
+packages/*/dist
+*.tsbuildinfo
+
+# Development files
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+.cursor
+
+# Test files
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__
+coverage
+
+# Documentation
+*.md
+!README.md
+
+# Docker files (prevent recursive copy)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local development
+.bun
+*.local
