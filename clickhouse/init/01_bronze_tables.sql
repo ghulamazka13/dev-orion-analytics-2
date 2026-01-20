@@ -1,0 +1,93 @@
+CREATE TABLE IF NOT EXISTS bronze.suricata_events_raw (
+  event_id String,
+  event_ts DateTime64(3, 'Asia/Jakarta'),
+  sensor_type Nullable(String),
+  sensor_name Nullable(String),
+  event_type Nullable(String),
+  severity Nullable(String),
+  src_ip Nullable(IPv6),
+  dest_ip Nullable(IPv6),
+  src_port Nullable(Int32),
+  dest_port Nullable(Int32),
+  protocol Nullable(String),
+  bytes Nullable(Int64),
+  packets Nullable(Int64),
+  flow_id Nullable(String),
+  signature Nullable(String),
+  signature_id Nullable(Int32),
+  category Nullable(String),
+  alert_action Nullable(String),
+  http_url Nullable(String),
+  tags Array(String),
+  message Nullable(String),
+  raw_data String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(event_ts)
+ORDER BY (event_ts, event_id);
+
+CREATE TABLE IF NOT EXISTS bronze.wazuh_events_raw (
+  event_id String,
+  event_ts DateTime64(3, 'Asia/Jakarta'),
+  event_ingested_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_start_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_end_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_dataset Nullable(String),
+  event_kind Nullable(String),
+  event_module Nullable(String),
+  event_provider Nullable(String),
+  agent_name Nullable(String),
+  agent_ip Nullable(IPv6),
+  host_name Nullable(String),
+  host_ip Nullable(IPv6),
+  rule_id Nullable(String),
+  rule_level Nullable(Int32),
+  rule_name Nullable(String),
+  rule_ruleset Nullable(String),
+  tags Array(String),
+  message Nullable(String),
+  raw_data String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(event_ts)
+ORDER BY (event_ts, event_id);
+
+CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
+  event_id String,
+  event_ts DateTime64(3, 'Asia/Jakarta'),
+  event_ingested_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_start_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_end_ts Nullable(DateTime64(3, 'Asia/Jakarta')),
+  event_dataset Nullable(String),
+  event_kind Nullable(String),
+  event_module Nullable(String),
+  event_provider Nullable(String),
+  zeek_uid Nullable(String),
+  sensor_name Nullable(String),
+  src_ip Nullable(IPv6),
+  dest_ip Nullable(IPv6),
+  src_port Nullable(Int32),
+  dest_port Nullable(Int32),
+  protocol Nullable(String),
+  application Nullable(String),
+  network_type Nullable(String),
+  direction Nullable(String),
+  community_id Nullable(String),
+  bytes Nullable(Int64),
+  packets Nullable(Int64),
+  orig_bytes Nullable(Int64),
+  resp_bytes Nullable(Int64),
+  orig_pkts Nullable(Int64),
+  resp_pkts Nullable(Int64),
+  conn_state Nullable(String),
+  conn_state_description Nullable(String),
+  duration Nullable(Float64),
+  history Nullable(String),
+  vlan_id Nullable(String),
+  tags Array(String),
+  message Nullable(String),
+  raw_data String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(event_ts)
+ORDER BY (event_ts, event_id);
