@@ -27,6 +27,9 @@ services:
       - CLICKHOUSE_USER=admin
       - CLICKHOUSE_PASSWORD=admin
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - KAFKA_BROKER_LIST=${KAFKA_BROKER_LIST:-10.110.12.20:9092}
+      - KAFKA_TOPIC_LIST=${KAFKA_TOPIC_LIST:-malcolm-logs}
+      - KAFKA_GROUP_SUFFIX=${HOSTNAME}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
@@ -34,7 +37,7 @@ services:
 
   chouse:
     build:
-      context: ./chouse-ui-1
+      context: ./chouse-ui
       dockerfile: Dockerfile
     ports:
       - "18087:5521"

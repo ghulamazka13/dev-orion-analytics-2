@@ -62,6 +62,8 @@ Roles/users are defined in `clickhouse/init/00_databases.sql`.
 - Materialized Views: `bronze.suricata_events_mv`, `bronze.wazuh_events_mv`, `bronze.zeek_events_mv`
 - Broker: `10.110.12.20:9092`
 - Topic: `malcolm-logs`
+- Consumer group defaults to `security_events_ch_<hostname>` to avoid cross-VM contention. Override with `KAFKA_GROUP_NAME` or set `KAFKA_GROUP_SUFFIX`.
+- Broker/topic can be overridden via `KAFKA_BROKER_LIST` and `KAFKA_TOPIC_LIST`.
 
 ## Airflow gold pipeline
 - DAG: `gold_star_schema`
