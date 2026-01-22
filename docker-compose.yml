@@ -46,6 +46,7 @@ services:
       - PORT=5521
       - STATIC_PATH=/app/dist
       - RBAC_DB_TYPE=sqlite
+      - SESSION_TTL=28800000
       - RBAC_SQLITE_PATH=/app/data/rbac.db
       - JWT_SECRET=dev-jwt-secret-change-me-please-32chars
       - RBAC_ENCRYPTION_KEY=dev-encryption-key-change-me-please-64chars-0000000000000000
