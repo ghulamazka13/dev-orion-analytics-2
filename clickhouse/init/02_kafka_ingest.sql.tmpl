@@ -43,6 +43,40 @@ SELECT
   toIPv6OrNull(JSON_VALUE(raw, '$.destination.ip')) AS dest_ip,
   toInt32OrNull(JSON_VALUE(raw, '$.source.port')) AS src_port,
   toInt32OrNull(JSON_VALUE(raw, '$.destination.port')) AS dest_port,
+  toFloat64OrNull(
+    coalesce(
+      nullIf(JSON_VALUE(raw, '$.source.geo.location.lat'), ''),
+      nullIf(JSON_VALUE(raw, '$.source.geo.latitude'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.location.lat'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.latitude'), '')
+    )
+  ) AS geo_latitude,
+  toFloat64OrNull(
+    coalesce(
+      nullIf(JSON_VALUE(raw, '$.source.geo.location.lon'), ''),
+      nullIf(JSON_VALUE(raw, '$.source.geo.longitude'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.location.lon'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.longitude'), '')
+    )
+  ) AS geo_longitude,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_iso_code'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_code2'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_code3'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_iso_code'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_code2'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_code3'), '')
+  ) AS geo_country,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.geo.city_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.city_name'), '')
+  ) AS geo_city_name,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.mac[0]'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.mac[0]'), '')
+  ) AS mac_address,
   coalesce(
     JSON_VALUE(raw, '$.network.application'),
     JSON_VALUE(raw, '$.network.transport[0]'),
