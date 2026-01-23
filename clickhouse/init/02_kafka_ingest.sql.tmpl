@@ -50,7 +50,7 @@ SELECT
   JSON_VALUE(raw, '$.related.mac[0]') as mac,
   JSON_VALUE(raw, '$.source.geo.location.lat') as latitude,
   JSON_VALUE(raw, '$.source.geo.location.lon') as longitude,
-  JSON_VALUE(raw, '$.source.geo.country_name') as country_name
+  JSON_VALUE(raw, '$.source.geo.country_name') as country_name,
   coalesce(
     JSON_VALUE(raw, '$.network.application'),
     JSON_VALUE(raw, '$.network.transport[0]'),
