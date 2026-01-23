@@ -43,7 +43,7 @@ SELECT
   toIPv6OrNull(JSON_VALUE(raw, '$.destination.ip')) AS dest_ip,
   toInt32OrNull(JSON_VALUE(raw, '$.source.port')) AS src_port,
   toInt32OrNull(JSON_VALUE(raw, '$.destination.port')) AS dest_port,
-  ifNull(JSON_VALUE(raw, '$.network.community_id'), '') AS community_id,
+  nullIf(JSON_VALUE(raw, '$.network.community_id'), '') AS community_id,
   toFloat64OrNull(JSON_VALUE(raw, '$.event.duration')) AS duration,
   JSON_VALUE(raw, '$.suricata.ether.dest_mac') as dest_mac,
   JSON_VALUE(raw, '$.suricata.ether.src_mac') as src_mac,
