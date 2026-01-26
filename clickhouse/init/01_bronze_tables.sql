@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
   history Nullable(String),
   vlan_id Nullable(String),
   tags Array(String),
+  domain Nullable(String),
   message Nullable(String),
   raw_data String
 )

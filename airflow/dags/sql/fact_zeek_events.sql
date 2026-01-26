@@ -34,6 +34,7 @@ INSERT INTO {{ params.target_table }} (
   duration_seconds,
   history,
   vlan_id,
+  domain,
   message,
   updated_at
 )
@@ -81,6 +82,7 @@ SELECT
   src.duration AS duration_seconds,
   src.history,
   src.vlan_id,
+  src.domain,
   src.message,
   now64(3, 'Asia/Jakarta') AS updated_at
 FROM (

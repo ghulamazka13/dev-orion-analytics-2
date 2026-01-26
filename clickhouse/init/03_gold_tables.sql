@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS gold.fact_zeek_events (
   duration_seconds Nullable(Float64),
   history Nullable(String),
   vlan_id Nullable(String),
+  domain Nullable(String),
   message Nullable(String),
   updated_at DateTime64(3, 'Asia/Jakarta')
 )

@@ -260,6 +260,11 @@ SELECT
     )
   ) AS tags,
   coalesce(
+    JSON_VALUE(raw, '$.zeek.http.host'),
+    JSON_VALUE(raw, '$.zeek.dns.query'),
+    JSON_VALUE(raw, '$.zeek.ssl.server_name')
+  ) AS domain,
+  coalesce(
     JSONExtractString(raw, 'message'),
     JSON_VALUE(raw, '$.event.original'),
     JSON_VALUE(raw, '$.zeek.conn.conn_state_description')
