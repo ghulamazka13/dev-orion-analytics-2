@@ -1,11 +1,22 @@
-# Near Real-Time Security Analytics POC
+﻿# Malcolm Insight: Near Real-Time Security Analytics POC
 
-This repo is an end-to-end near real-time analytics POC using a Medallion architecture with ClickHouse storage and Airflow batch transforms.
+This repo is an end-to-end near real-time security analytics POC for Wazuh, Suricata, and Zeek logs. Kafka events are ingested into ClickHouse (bronze), Airflow runs SQL transforms into a gold star schema, and Superset or CHouse UI provides analytics.
 
-Dataflow
-- Redpanda (remote) -> ClickHouse Kafka Engine -> bronze.* (raw)
-- Airflow runs ClickHouse SQL to build the gold star schema (dims/facts/bridges)
-- Superset reads gold only
+## Stack
+- ClickHouse 24.3 (bronze + gold)
+- Airflow 2.9.2 (LocalExecutor) for gold pipelines
+- Postgres 16.3 (metadata store for dynamic DAGs)
+- Superset 4.0.1 for BI
+- CHouse UI for ClickHouse admin with RBAC
+- External Kafka broker (not included in this compose)
+
+## Dataflow
+- Kafka topic -> ClickHouse Kafka engine -> bronze.* raw tables
+- Airflow executes SQL templates in `airflow/dags/sql` based on Postgres metadata
+- Gold star schema (dims, facts, bridges) in `gold.*`
+- Superset and CHouse UI query gold
+
+See `FACT_DIM_ARCHITECTURE.md` for the star schema design.
 
 ## Quickstart
 
@@ -24,8 +35,10 @@ docker compose ps
 3) Open UIs
 - Airflow: http://localhost:18088 (admin/admin)
 - Superset: http://localhost:18089 (admin/admin)
-- ClickHouse HTTP: http://localhost:18123
 - CHouse UI: http://localhost:18087 (admin@localhost / admin123!)
+- ClickHouse HTTP: http://localhost:18123
+- ClickHouse TCP: localhost:19000
+- Postgres: localhost:15432 (airflow/airflow, db `airflow`)
 
 In CHouse UI, add a ClickHouse connection:
 - URL: http://clickhouse:8123
@@ -52,26 +65,44 @@ ClickHouse RBAC is enabled on init.
 
 Default credentials:
 - ClickHouse admin: admin/admin
-- etl_runner: etl_runner/etl_runner
-- superset: superset/superset
+- ClickHouse etl_runner: etl_runner/etl_runner
+- ClickHouse superset: superset/superset
+- Airflow: admin/admin
+- Superset: admin/admin
+- CHouse UI: admin@localhost / admin123!
 
 Roles/users are defined in `clickhouse/init/00_databases.sql`.
 
-## ClickHouse ingestion (Kafka Engine)
+## ClickHouse ingestion (Kafka engine)
 - Kafka table: `bronze.security_events_kafka`
-- Materialized Views: `bronze.suricata_events_mv`, `bronze.wazuh_events_mv`, `bronze.zeek_events_mv`
-- Broker: `10.110.12.20:9092`
-- Topic: `malcolm-logs`
-- Consumer group defaults to `security_events_ch_<hostname>` to avoid cross-VM contention. Override with `KAFKA_GROUP_NAME` or set `KAFKA_GROUP_SUFFIX`.
-- Broker/topic can be overridden via `KAFKA_BROKER_LIST` and `KAFKA_TOPIC_LIST`.
+- Materialized views: `bronze.suricata_events_mv`, `bronze.wazuh_events_mv`, `bronze.zeek_events_mv`
+- Default broker: `10.110.12.20:9092`
+- Default topic: `malcolm-logs`
+- Consumer group defaults to `security_events_ch_<suffix>` where `<suffix>` is:
+  - `KAFKA_GROUP_SUFFIX` if set
+  - otherwise `HOSTNAME` (from the container)
+  - otherwise `local`
+
+Override with environment variables before `docker compose up`:
+- `KAFKA_BROKER_LIST`
+- `KAFKA_TOPIC_LIST`
+- `KAFKA_GROUP_NAME` (full override)
+- `KAFKA_GROUP_SUFFIX` (suffix-only override)
+
+Note: Kafka/Redpanda is not part of this compose stack.
 
 ## Airflow gold pipeline
-- DAG: `gold_star_schema`
+- DAG: `gold_star_schema` (generated at runtime)
 - Metadata source-of-truth: Postgres tables `metadata.gold_dags` + `metadata.gold_pipelines`
 - Metadata updater DAG: `metadata_updater` (exports a YAML snapshot to `airflow/dags/gold_pipelines.yml`)
 - SQL templates: `airflow/dags/sql/*.sql` (one pipeline per file)
 - Default window: 10 minutes (override with `dag_run.conf` `start_ts`/`end_ts` or `window_minutes`)
-- Bronze and gold timestamps are stored in `Asia/Jakarta` (UTC+7).
+- Bronze and gold timestamps are stored in `Asia/Jakarta` (UTC+7)
+
+Config switches:
+- `GOLD_PIPELINES_SOURCE=postgres` (default) or `file`
+- `GOLD_PIPELINES_PATH` to override the YAML path
+- `GOLD_METADATA_DAG_NAME` or `GOLD_METADATA_DAG_ID` to select a single DAG when running `metadata_updater`
 
 To add a new gold pipeline (existing DAG):
 1) Get the DAG numeric id:
@@ -127,6 +158,7 @@ docker compose exec -T airflow-webserver airflow dags trigger gold_star_schema \
 ## Metadata store (Postgres)
 Metadata schema and seed data live in `postgres/init/10_metadata.sql`.
 `metadata.gold_pipelines.dag_id` is a numeric FK to `metadata.gold_dags.id`.
+
 If the Postgres volume already exists, apply the SQL manually:
 
 ```bash
@@ -164,13 +196,20 @@ FROM dag;
 ```
 
 ## Superset
+Log in at http://localhost:18089 with admin/admin.
+
 Use the ClickHouse connector:
 
 ```
 clickhouse+connect://superset:superset@clickhouse:8123/default
 ```
 
-Add datasets from the gold schema (facts + dims).
+Add datasets from the gold schema (facts + dims). For step-by-step setup see `superset/bootstrap/README_superset.md`.
+
+## Examples and smoke test
+- ClickHouse query samples: `scripts/clickhouse_examples.sql`
+- Superset query samples: `scripts/superset_sql_examples.sql`
+- Smoke test (Linux/WSL): `scripts/smoke_test.sh`
 
 ## Optional one-time backfill (from Postgres)
 If you have historical data in Postgres, run a one-time import into ClickHouse using the `postgresql` table function. A ready-to-run backfill script is provided in `scripts/postgres_to_clickhouse_backfill.sql`.
@@ -206,5 +245,6 @@ Get-Content scripts/postgres_gold_to_clickhouse_backfill.sql | \
 ```
 
 ## Troubleshooting
-- If Kafka ingestion is empty, verify the broker `10.110.12.20:9092` is reachable from the ClickHouse container.
-- If gold DAG fails, check Airflow logs and ClickHouse permissions for `etl_runner`.
+- If Kafka ingestion is empty, verify the broker `10.110.12.20:9092` is reachable from the ClickHouse container and the topic has data.
+- If gold DAGs do not appear, check the metadata tables in Postgres and run `metadata_updater`.
+- If the gold DAG fails, check Airflow logs and ClickHouse permissions for `etl_runner`.
