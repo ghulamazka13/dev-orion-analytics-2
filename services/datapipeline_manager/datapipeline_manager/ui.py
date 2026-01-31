@@ -471,9 +471,19 @@ def _get_auth_cookie() -> Optional[str]:
     if not manager:
         return None
     try:
-        return manager.get(config.AUTH_COOKIE_NAME)
+        cookies = None
+        if hasattr(manager, "get_all"):
+            cookies = manager.get_all()
+            if cookies is None:
+                st.stop()
+            if isinstance(cookies, dict):
+                return cookies.get(config.AUTH_COOKIE_NAME)
+        value = manager.get(config.AUTH_COOKIE_NAME)
     except Exception:
         return None
+    if isinstance(value, dict):
+        return value.get("value")
+    return value
 
 
 def _set_auth_cookie(token: str) -> None:
@@ -482,7 +492,19 @@ def _set_auth_cookie(token: str) -> None:
         return
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=config.AUTH_TTL_SECONDS)
     try:
-        manager.set(config.AUTH_COOKIE_NAME, token, expires_at=expires_at)
+        manager.set(
+            config.AUTH_COOKIE_NAME,
+            token,
+            expires_at=expires_at,
+            path="/",
+            secure=config.AUTH_COOKIE_SECURE,
+            same_site=config.AUTH_COOKIE_SAMESITE,
+        )
+    except TypeError:
+        try:
+            manager.set(config.AUTH_COOKIE_NAME, token, expires_at=expires_at)
+        except Exception:
+            return
     except Exception:
         return
 
@@ -499,7 +521,19 @@ def _clear_auth_cookie() -> None:
             pass
     expires_at = datetime.now(timezone.utc) - timedelta(days=1)
     try:
-        manager.set(config.AUTH_COOKIE_NAME, "", expires_at=expires_at)
+        manager.set(
+            config.AUTH_COOKIE_NAME,
+            "",
+            expires_at=expires_at,
+            path="/",
+            secure=config.AUTH_COOKIE_SECURE,
+            same_site=config.AUTH_COOKIE_SAMESITE,
+        )
+    except TypeError:
+        try:
+            manager.set(config.AUTH_COOKIE_NAME, "", expires_at=expires_at)
+        except Exception:
+            return
     except Exception:
         return
 
