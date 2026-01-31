@@ -340,6 +340,8 @@ User flow (typical):
 3) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
 4) Backfill: queue historical loads if needed.
 5) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
+6) Bronze Parsing: create per-project bronze tables (zeek/wazuh/suricata) sourced from
+   `<project_id>_bronze.os_events_raw`, then click "Apply Schema Changes" to build tables + materialized views.
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.

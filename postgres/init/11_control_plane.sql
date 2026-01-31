@@ -130,6 +130,40 @@ CREATE TABLE IF NOT EXISTS metadata.field_registry (
     ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS metadata.bronze_event_tables (
+  table_id BIGSERIAL PRIMARY KEY,
+  project_id TEXT,
+  dataset TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (project_id, table_name),
+  CONSTRAINT bronze_event_tables_project_fk
+    FOREIGN KEY (project_id)
+    REFERENCES metadata.projects (project_id)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata.bronze_event_fields (
+  field_id BIGSERIAL PRIMARY KEY,
+  table_id BIGINT NOT NULL,
+  column_name TEXT NOT NULL,
+  column_type TEXT NOT NULL,
+  json_path TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (table_id, column_name),
+  CONSTRAINT bronze_event_fields_table_fk
+    FOREIGN KEY (table_id)
+    REFERENCES metadata.bronze_event_tables (table_id)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_ui_users_role
   ON metadata.ui_users (role);
 
@@ -156,3 +190,15 @@ CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_seen
 
 CREATE INDEX IF NOT EXISTS idx_field_registry_enabled
   ON metadata.field_registry (enabled);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_event_tables_project
+  ON metadata.bronze_event_tables (project_id);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_event_tables_enabled
+  ON metadata.bronze_event_tables (enabled);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_event_fields_table
+  ON metadata.bronze_event_fields (table_id);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_event_fields_enabled
+  ON metadata.bronze_event_fields (enabled);
