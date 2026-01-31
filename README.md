@@ -8,6 +8,9 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 - Postgres 16.3 (metadata store for dynamic DAGs)
 - Superset 4.0.1 for BI
 - CHouse UI for ClickHouse admin with RBAC
+- OpenSearch Puller (metadata-driven ingestion)
+- ITSEC Datapipeline Manager (Streamlit) for onboarding + field registry + monitoring
+- Schema Migrator (ClickHouse DDL from metadata)
 - External Kafka broker (not included in this compose)
 
 ## Dataflow
@@ -26,7 +29,7 @@ See `FACT_DIM_ARCHITECTURE.md` for the star schema design.
 docker compose up -d
 ```
 
-2) Wait for services
+2) Wait for services2
 
 ```bash
 docker compose ps
@@ -36,6 +39,7 @@ docker compose ps
 - Airflow: http://localhost:18088 (admin/admin)
 - Superset: http://localhost:18089 (admin/admin)
 - CHouse UI: http://localhost:18087 (admin@localhost / admin123!)
+- ITSEC Datapipeline Manager: http://localhost:18090
 - ClickHouse HTTP: http://localhost:18123
 - ClickHouse TCP: localhost:19000
 - Postgres: localhost:15432 (airflow/airflow, db `airflow`)
@@ -194,6 +198,152 @@ SELECT
   20
 FROM dag;
 ```
+
+## ITSEC Datapipeline Manager (multi-project control plane)
+New OpenSearch sources are driven by Postgres metadata in `postgres/init/11_control_plane.sql`.
+If the Postgres volume already exists, apply it manually:
+
+```bash
+docker compose exec -T postgres psql -U airflow -d airflow -f /docker-entrypoint-initdb.d/11_control_plane.sql
+```
+
+If the control-plane tables already exist, apply the new columns as needed:
+
+```sql
+ALTER TABLE metadata.backfill_jobs ADD COLUMN IF NOT EXISTS throttle_seconds INTEGER;
+CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
+  worker_id TEXT PRIMARY KEY,
+  worker_type TEXT NOT NULL,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status TEXT NOT NULL DEFAULT 'ok',
+  details JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+```
+
+### 1) Create a project
+Projects map to ClickHouse databases `<project_id>_bronze` and `<project_id>_gold`.
+Use ITSEC Datapipeline Manager (http://localhost:18090) or SQL:
+
+```sql
+INSERT INTO metadata.projects (project_id, name, timezone, retention_days)
+VALUES ('acme', 'ACME Corp', 'UTC', 90)
+ON CONFLICT (project_id) DO NOTHING;
+```
+
+### 2) Add an OpenSearch source
+Secrets are stored via `secret_ref` (file path mounted into containers).
+Example:
+
+```sql
+INSERT INTO metadata.opensearch_sources (
+  project_id, name, base_url, auth_type, username,
+  secret_ref, index_pattern, time_field, query_filter_json
+) VALUES (
+  'acme', 'acme-os', 'https://opensearch.acme.local:9200',
+  'api_key', NULL, '/run/secrets/acme_os_key',
+  'logs-*', '@timestamp', '{}'::jsonb
+);
+```
+
+Mount secrets into the containers (example host folder):
+`./secrets:/run/secrets:ro`
+
+### 3) Run the schema migrator
+This creates per-project databases and the `os_events_raw` table, and applies field registry changes:
+
+```bash
+docker compose run --rm schema-migrator
+```
+
+### 4) Trigger a backfill
+Create a backfill job (or use ITSEC Datapipeline Manager):
+
+```sql
+INSERT INTO metadata.backfill_jobs (source_id, start_ts, end_ts, requested_by)
+VALUES (1, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'admin');
+```
+
+### 5) Add custom fields via Field Registry
+Fields are added idempotently using `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+Example:
+
+```sql
+INSERT INTO metadata.field_registry (
+  project_id, dataset, layer, table_name, column_name, column_type,
+  expression_sql, mode
+) VALUES (
+  'acme', 'generic', 'bronze', 'os_events_raw', 'user_name', 'Nullable(String)',
+  'JSONExtractString(raw, ''user.name'')', 'ALIAS'
+);
+```
+
+Then run:
+
+```bash
+docker compose run --rm schema-migrator
+```
+
+### OpenSearch puller config
+Environment variables:
+- `POSTGRES_DSN`
+- `CLICKHOUSE_HTTP_URL`
+- `BATCH_SIZE`
+- `OVERLAP_MINUTES`
+- `POLL_INTERVAL_SECONDS`
+- `LOG_LEVEL`
+- `OPENSEARCH_VERIFY_SSL`
+- `MAX_RETRIES`, `BACKOFF_BASE_SECONDS`, `RATE_LIMIT_SECONDS` (optional)
+- `WORKER_ID` (optional heartbeat identifier)
+
+Puller config can also be managed in the Datapipeline Manager UI (Puller page). When present,
+values in `metadata.opensearch_puller_config` override the env defaults each polling loop.
+
+If you already initialized Postgres before this table existed, run once:
+
+```sql
+CREATE TABLE IF NOT EXISTS metadata.opensearch_puller_config (
+  config_id SMALLINT PRIMARY KEY DEFAULT 1,
+  poll_interval_seconds INTEGER NOT NULL DEFAULT 30,
+  overlap_minutes INTEGER NOT NULL DEFAULT 10,
+  batch_size INTEGER NOT NULL DEFAULT 500,
+  max_retries INTEGER NOT NULL DEFAULT 3,
+  backoff_base_seconds DOUBLE PRECISION NOT NULL DEFAULT 1,
+  rate_limit_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+  opensearch_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  clickhouse_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  opensearch_verify_ssl BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO metadata.opensearch_puller_config (config_id)
+VALUES (1)
+ON CONFLICT (config_id) DO NOTHING;
+```
+
+## ITSEC Datapipeline Manager usage
+Access the UI at http://localhost:18090.
+
+Default credentials:
+- username: `admin`
+- password: `admin123!`
+
+Docker service: `itsec-datapipeline-manager`
+
+Upgrade tip: if you previously ran the old Source Manager container, use:
+`docker compose up -d --build --remove-orphans`
+
+User flow (typical):
+1) Projects: create a project (`project_id` becomes `<project_id>_bronze` and `<project_id>_gold`).
+2) Puller: add OpenSearch sources, adjust polling config, and monitor ingestion health.
+   (You can also use the Sources page for full source editing.)
+3) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
+4) Backfill: queue historical loads if needed.
+5) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
+
+Notes:
+- Schema changes and metadata updates are idempotent and require no service restarts.
+- Backfill throttling can be set per job in the UI (`throttle_seconds`).
 
 ## Superset
 Log in at http://localhost:18089 with admin/admin.

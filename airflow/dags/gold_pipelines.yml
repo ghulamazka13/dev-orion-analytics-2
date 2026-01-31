@@ -1,5 +1,5 @@
 dag:
-  dag_id: star_schema
+  dag_id: gold_star_schema
   schedule_cron: '*/5 * * * *'
   timezone: Asia/Jakarta
   owner: data-eng
