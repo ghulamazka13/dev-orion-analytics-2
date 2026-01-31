@@ -3,11 +3,15 @@ import hashlib
 import hmac
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import streamlit as st
 from cryptography.fernet import Fernet, InvalidToken
+try:
+    import extra_streamlit_components as stx
+except Exception:
+    stx = None
 
 from . import config, db
 
@@ -15,6 +19,17 @@ APP_TITLE = "ITSEC Datapipeline Manager"
 DEFAULT_PAGE = "Dashboard.py"
 ROLE_OPTIONS = ("viewer", "editor", "admin")
 ROLE_LEVELS = {"viewer": 1, "editor": 2, "admin": 3}
+_COOKIE_MANAGER_KEY = "itsec_cookie_manager"
+
+
+def _cookie_manager():
+    if stx is None:
+        return None
+    manager = st.session_state.get(_COOKIE_MANAGER_KEY)
+    if manager is None:
+        manager = stx.CookieManager()
+        st.session_state[_COOKIE_MANAGER_KEY] = manager
+    return manager
 
 
 def set_page_config(title: str) -> None:
@@ -309,9 +324,7 @@ def sidebar() -> None:
         )
     if config.UI_PASSWORD and is_authenticated():
         if st.sidebar.button("Sign out", use_container_width=True):
-            st.session_state.pop("authenticated", None)
-            st.session_state.pop("username", None)
-            st.session_state.pop("role", None)
+            _clear_auth()
             _rerun()
 
 
@@ -327,6 +340,13 @@ def notify(message: str, level: str = "success") -> None:
         st.warning(message)
     else:
         st.info(message)
+
+
+def _clear_auth() -> None:
+    st.session_state.pop("authenticated", None)
+    st.session_state.pop("username", None)
+    st.session_state.pop("role", None)
+    _clear_auth_cookie()
 
 
 def is_authenticated() -> bool:
@@ -364,15 +384,14 @@ def login_page() -> None:
         if submitted:
             user, error = authenticate_user(username, password)
             if user:
-                st.session_state["authenticated"] = True
-                st.session_state["username"] = user["username"]
-                st.session_state["role"] = user["role"]
+                _persist_auth(user)
                 _rerun()
             else:
                 st.error(error or "Invalid credentials.")
 
 
 def require_auth() -> None:
+    _restore_auth_from_cookie()
     if is_authenticated():
         return
     inject_css(hide_sidebar=True)
@@ -407,6 +426,106 @@ def _secret_key() -> Optional[bytes]:
         return None
     digest = hashlib.sha256(key_material.encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest)
+
+
+def _auth_fernet() -> Optional[Fernet]:
+    key = _secret_key()
+    if not key:
+        return None
+    return Fernet(key)
+
+
+def _encode_auth_token(user: Dict[str, Any]) -> Optional[str]:
+    fernet = _auth_fernet()
+    if not fernet:
+        return None
+    payload = {
+        "username": user.get("username"),
+        "role": user.get("role"),
+    }
+    token = fernet.encrypt(json.dumps(payload).encode("utf-8"))
+    return token.decode("utf-8")
+
+
+def _decode_auth_token(token: str) -> Optional[Dict[str, Any]]:
+    fernet = _auth_fernet()
+    if not fernet:
+        return None
+    try:
+        payload = fernet.decrypt(token.encode("utf-8"), ttl=config.AUTH_TTL_SECONDS)
+    except InvalidToken:
+        return None
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not data.get("username"):
+        return None
+    return data
+
+
+def _get_auth_cookie() -> Optional[str]:
+    manager = _cookie_manager()
+    if not manager:
+        return None
+    try:
+        return manager.get(config.AUTH_COOKIE_NAME)
+    except Exception:
+        return None
+
+
+def _set_auth_cookie(token: str) -> None:
+    manager = _cookie_manager()
+    if not manager:
+        return
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=config.AUTH_TTL_SECONDS)
+    try:
+        manager.set(config.AUTH_COOKIE_NAME, token, expires_at=expires_at)
+    except Exception:
+        return
+
+
+def _clear_auth_cookie() -> None:
+    manager = _cookie_manager()
+    if not manager:
+        return
+    if hasattr(manager, "delete"):
+        try:
+            manager.delete(config.AUTH_COOKIE_NAME)
+            return
+        except Exception:
+            pass
+    expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+    try:
+        manager.set(config.AUTH_COOKIE_NAME, "", expires_at=expires_at)
+    except Exception:
+        return
+
+
+def _persist_auth(user: Dict[str, Any]) -> None:
+    st.session_state["authenticated"] = True
+    st.session_state["username"] = user.get("username")
+    st.session_state["role"] = user.get("role")
+    token = _encode_auth_token(user)
+    if token:
+        _set_auth_cookie(token)
+
+
+def _restore_auth_from_cookie() -> None:
+    if not config.UI_PASSWORD or is_authenticated():
+        return
+    token = _get_auth_cookie()
+    if not token:
+        return
+    user = _decode_auth_token(token)
+    if not user:
+        _clear_auth_cookie()
+        return
+    st.session_state["authenticated"] = True
+    st.session_state["username"] = user.get("username")
+    st.session_state["role"] = user.get("role")
 
 
 def encrypt_secret(secret: str) -> Optional[bytes]:
