@@ -132,18 +132,6 @@ project_db = {
     for row in projects
 }
 
-try:
-    bronze_tables = db.fetch_all(
-        """
-        SELECT project_id, dataset, table_name
-        FROM metadata.bronze_event_tables
-        WHERE enabled = TRUE
-        ORDER BY project_id, dataset, table_name
-        """
-    )
-except Exception:
-    bronze_tables = []
-
 if HAS_TARGET_ROUTING:
     sources = db.fetch_all(
         """
@@ -216,31 +204,18 @@ with tabs[0]:
             target_dataset = ""
             target_table_name = ""
             if HAS_TARGET_ROUTING:
-                project_table_rows = [
-                    row for row in bronze_tables if row.get("project_id") == project_id
-                ]
-                target_option_map = {
-                    f"{row['dataset']} -> {row['table_name']}": row
-                    for row in project_table_rows
-                }
-                if target_option_map:
-                    selected_target = st.selectbox(
-                        "Target Bronze Schema",
-                        options=list(target_option_map.keys()),
-                        help=(
-                            "Selecting a target schema is required. The puller will skip this source "
-                            "without a valid target dataset+table."
-                        ),
-                    )
-                    selected_target_row = target_option_map[selected_target]
-                    target_dataset = (selected_target_row or {}).get("dataset") or ""
-                    target_table_name = (selected_target_row or {}).get("table_name") or ""
-                    st.caption(f"Routing target: `{target_dataset}` -> `{target_table_name}`")
-                else:
-                    st.warning(
-                        "There is no active Bronze Schema for this project yet. "
-                        "Create one first in the Bronze Tables menu."
-                    )
+                target_dataset = st.text_input(
+                    "Target Dataset",
+                    value="default",
+                    help="Logical dataset label for routing and metadata.",
+                )
+                target_table_name = st.text_input(
+                    "Target Table Name",
+                    value="os_events_raw",
+                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
+                )
+                if target_table_name:
+                    st.caption(f"Write target: `<project_namespace>_bronze.{target_table_name}`")
 
         with st.expander("Step 3: Filters", expanded=False):
             query_filter_json = st.text_area("Query Filter JSON", value="{}", height=80)
@@ -301,18 +276,11 @@ with tabs[0]:
             label = "Password" if auth_type == "basic" else "Secret"
             st.error(f"{label} is required for the selected auth type.")
         elif not target_dataset_norm or not target_table_norm:
-            st.error("Target Bronze Schema is required.")
+            st.error("Target Dataset and Target Table Name are required.")
         elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
             st.error("Target Dataset must be alphanumeric + underscore.")
         elif target_table_norm and not _is_safe_identifier(target_table_norm):
             st.error("Target Table must be alphanumeric + underscore.")
-        elif target_dataset_norm and target_table_norm and not any(
-            (row.get("project_id") == project_id)
-            and ((row.get("dataset") or "").lower() == target_dataset_norm)
-            and ((row.get("table_name") or "").lower() == target_table_norm)
-            for row in bronze_tables
-        ):
-            st.error("Target schema is not defined in Bronze Tables.")
         else:
             secret_ref_value = None
             secret_enc_value = None
@@ -677,37 +645,82 @@ with tabs[2]:
             st.error("Project namespace contains unsupported characters.")
         else:
             try:
-                rows = clickhouse.query_rows(
-                    f"""
-                    SELECT count() AS events_last_hour
-                    FROM {selected_project_db}_bronze.os_events_raw
-                    WHERE event_ts >= now() - INTERVAL 1 HOUR
-                    """
+                target_tables = sorted(
+                    {
+                        str(row.get("target_table_name") or "").strip().lower()
+                        for row in sources
+                        if row.get("project_id") == selected_project
+                        and row.get("enabled")
+                        and str(row.get("target_table_name") or "").strip()
+                        and _is_safe_identifier(str(row.get("target_table_name") or "").strip().lower())
+                    }
                 )
-                count = rows[0]["events_last_hour"] if rows else 0
-                st.metric("Events (Last Hour)", int(count))
+                if not target_tables:
+                    st.info("No target tables configured for this project.")
+                else:
+                    total_events_last_hour = 0
+                    latest_event_ts = None
+                    per_source: dict = {}
 
-                rows = clickhouse.query_rows(
-                    f"""
-                    SELECT max(event_ts) AS last_event_ts
-                    FROM {selected_project_db}_bronze.os_events_raw
-                    """
-                )
-                last_event_ts = rows[0]["last_event_ts"] if rows else None
-                st.metric("Latest Event", str(last_event_ts) if last_event_ts else "n/a")
+                    for table_name in target_tables:
+                        qualified_table = f"`{selected_project_db}_bronze`.`{table_name}`"
+                        rows = clickhouse.query_rows(
+                            f"""
+                            SELECT count() AS events_last_hour
+                            FROM {qualified_table}
+                            WHERE event_ts >= now() - INTERVAL 1 HOUR
+                            """
+                        )
+                        table_count = int(rows[0]["events_last_hour"]) if rows else 0
+                        total_events_last_hour += table_count
 
-                rows = clickhouse.query_rows(
-                    f"""
-                    SELECT source_id,
-                           count() AS events_last_hour,
-                           max(event_ts) AS last_event_ts
-                    FROM {selected_project_db}_bronze.os_events_raw
-                    WHERE event_ts >= now() - INTERVAL 1 HOUR
-                    GROUP BY source_id
-                    ORDER BY events_last_hour DESC
-                    """
-                )
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                        rows = clickhouse.query_rows(
+                            f"""
+                            SELECT max(event_ts) AS last_event_ts
+                            FROM {qualified_table}
+                            """
+                        )
+                        table_last_ts = rows[0]["last_event_ts"] if rows else None
+                        if table_last_ts and (latest_event_ts is None or table_last_ts > latest_event_ts):
+                            latest_event_ts = table_last_ts
+
+                        rows = clickhouse.query_rows(
+                            f"""
+                            SELECT source_id,
+                                   count() AS events_last_hour,
+                                   max(event_ts) AS last_event_ts
+                            FROM {qualified_table}
+                            WHERE event_ts >= now() - INTERVAL 1 HOUR
+                            GROUP BY source_id
+                            """
+                        )
+                        for source_row in rows:
+                            source_id = source_row.get("source_id")
+                            if not source_id:
+                                continue
+                            current = per_source.get(source_id, {"events_last_hour": 0, "last_event_ts": None})
+                            current["events_last_hour"] += int(source_row.get("events_last_hour") or 0)
+                            row_last_ts = source_row.get("last_event_ts")
+                            if row_last_ts and (
+                                current["last_event_ts"] is None or row_last_ts > current["last_event_ts"]
+                            ):
+                                current["last_event_ts"] = row_last_ts
+                            per_source[source_id] = current
+
+                    st.metric("Events (Last Hour)", total_events_last_hour)
+                    st.metric("Latest Event", str(latest_event_ts) if latest_event_ts else "n/a")
+
+                    if per_source:
+                        source_rows = [
+                            {
+                                "source_id": source_id,
+                                "events_last_hour": values["events_last_hour"],
+                                "last_event_ts": values["last_event_ts"],
+                            }
+                            for source_id, values in per_source.items()
+                        ]
+                        source_rows.sort(key=lambda item: item["events_last_hour"], reverse=True)
+                        st.dataframe(pd.DataFrame(source_rows), use_container_width=True)
+                    st.caption(f"Tables scanned: {', '.join(target_tables)}")
             except Exception as exc:
                 st.error(f"ClickHouse query failed: {exc}")

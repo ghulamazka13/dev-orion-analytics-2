@@ -41,6 +41,33 @@ def _derive_clickhouse_namespace(project_id: str, name: str, explicit: str) -> s
     return namespace
 
 
+def _is_safe_identifier(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z0-9_]+$", value or ""))
+
+
+def _fetch_target_tables(project_id: str) -> list[str]:
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT DISTINCT lower(target_table_name) AS target_table_name
+            FROM metadata.opensearch_sources
+            WHERE project_id = %s
+              AND enabled = TRUE
+              AND NULLIF(btrim(target_table_name), '') IS NOT NULL
+            ORDER BY 1
+            """,
+            (project_id,),
+        )
+    except Exception:
+        rows = []
+    tables = [
+        str(row.get("target_table_name") or "").strip()
+        for row in rows
+        if _is_safe_identifier(str(row.get("target_table_name") or "").strip())
+    ]
+    return sorted(set(tables))
+
+
 def _worker_status():
     heartbeat = db.fetch_one(
         """
@@ -171,15 +198,23 @@ with col1:
     if selected_project and selected_project != "no-projects":
         try:
             selected_project_db = project_db.get(selected_project, selected_project)
-            rows = clickhouse.query_rows(
-                f"""
-                SELECT count() AS events_last_hour
-                FROM {selected_project_db}_bronze.os_events_raw
-                WHERE event_ts >= now() - INTERVAL 1 HOUR
-                """
-            )
-            count = rows[0]["events_last_hour"] if rows else 0
-            st.metric("Events (Last Hour)", int(count))
+            target_tables = _fetch_target_tables(selected_project)
+            total_events = 0
+            for table_name in target_tables:
+                qualified_table = f"`{selected_project_db}_bronze`.`{table_name}`"
+                rows = clickhouse.query_rows(
+                    f"""
+                    SELECT count() AS events_last_hour
+                    FROM {qualified_table}
+                    WHERE event_ts >= now() - INTERVAL 1 HOUR
+                    """
+                )
+                total_events += int(rows[0]["events_last_hour"]) if rows else 0
+            st.metric("Events (Last Hour)", int(total_events))
+            if target_tables:
+                st.caption(f"Tables scanned: {', '.join(target_tables)}")
+            else:
+                st.caption("No target tables configured for this project.")
         except Exception as exc:
             st.error(f"ClickHouse query failed: {exc}")
 with col2:

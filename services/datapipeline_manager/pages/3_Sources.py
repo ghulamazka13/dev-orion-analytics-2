@@ -54,18 +54,6 @@ projects = db.fetch_all(
 )
 project_ids = [row["project_id"] for row in projects]
 
-try:
-    bronze_tables = db.fetch_all(
-        """
-        SELECT project_id, dataset, table_name
-        FROM metadata.bronze_event_tables
-        WHERE enabled = TRUE
-        ORDER BY project_id, dataset, table_name
-        """
-    )
-except Exception:
-    bronze_tables = []
-
 if HAS_TARGET_ROUTING:
     sources = db.fetch_all(
         """
@@ -167,42 +155,18 @@ with tabs[0]:
             target_dataset = ""
             target_table_name = ""
             if HAS_TARGET_ROUTING:
-                project_table_rows = [
-                    row for row in bronze_tables if row.get("project_id") == project_id
-                ]
-                target_option_map = {
-                    f"{row['dataset']} -> {row['table_name']}": row
-                    for row in project_table_rows
-                }
-                if target_option_map:
-                    current_target_label = None
-                    if current and current.get("target_dataset") and current.get("target_table_name"):
-                        for label, row in target_option_map.items():
-                            if (
-                                (row.get("dataset") or "").lower() == str(current["target_dataset"]).lower()
-                                and (row.get("table_name") or "").lower() == str(current["target_table_name"]).lower()
-                            ):
-                                current_target_label = label
-                                break
-                    options = list(target_option_map.keys())
-                    selected_target = st.selectbox(
-                        "Target Bronze Schema",
-                        options=options,
-                        index=options.index(current_target_label) if current_target_label in options else 0,
-                        help=(
-                            "Selecting a target schema is required. The puller will skip this source "
-                            "without a valid target dataset+table."
-                        ),
-                    )
-                    selected_target_row = target_option_map[selected_target]
-                    target_dataset = (selected_target_row or {}).get("dataset") or ""
-                    target_table_name = (selected_target_row or {}).get("table_name") or ""
-                    st.caption(f"Routing target: `{target_dataset}` -> `{target_table_name}`")
-                else:
-                    st.warning(
-                        "There is no active Bronze Schema for this project yet. "
-                        "Create one first in the Bronze Tables menu."
-                    )
+                target_dataset = st.text_input(
+                    "Target Dataset",
+                    value=(current.get("target_dataset") if current else "") or "",
+                    help="Logical dataset label for routing and metadata.",
+                )
+                target_table_name = st.text_input(
+                    "Target Table Name",
+                    value=(current.get("target_table_name") if current else "") or "",
+                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
+                )
+                if target_table_name:
+                    st.caption(f"Write target: `<project_namespace>_bronze.{target_table_name}`")
 
         with st.expander("Step 3: Filters", expanded=False):
             query_filter_json = st.text_area(
@@ -268,18 +232,11 @@ with tabs[0]:
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
         elif not target_dataset_norm or not target_table_norm:
-            st.error("Target Bronze Schema is required.")
+            st.error("Target Dataset and Target Table Name are required.")
         elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
             st.error("Target Dataset must be alphanumeric + underscore.")
         elif target_table_norm and not _is_safe_identifier(target_table_norm):
             st.error("Target Table must be alphanumeric + underscore.")
-        elif target_dataset_norm and target_table_norm and not any(
-            (row.get("project_id") == project_id)
-            and ((row.get("dataset") or "").lower() == target_dataset_norm)
-            and ((row.get("table_name") or "").lower() == target_table_norm)
-            for row in bronze_tables
-        ):
-            st.error("Target schema is not defined in Bronze Tables.")
         else:
             secret_ref_value = None
             secret_enc_value = None

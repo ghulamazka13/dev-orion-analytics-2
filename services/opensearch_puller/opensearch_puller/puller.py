@@ -81,13 +81,9 @@ class PgStore:
                            s.time_field,
                            s.target_dataset,
                            s.target_table_name,
-                           EXISTS (
-                             SELECT 1
-                             FROM metadata.bronze_event_tables t
-                             WHERE t.enabled = TRUE
-                               AND t.project_id = s.project_id
-                               AND lower(t.dataset) = lower(s.target_dataset)
-                               AND lower(t.table_name) = lower(s.target_table_name)
+                           (
+                             NULLIF(btrim(s.target_dataset), '') IS NOT NULL
+                             AND NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                            ) AS target_ready,
                            s.query_filter_json,
                            s.enabled,
@@ -123,13 +119,9 @@ class PgStore:
                                s.time_field,
                                s.target_dataset,
                                s.target_table_name,
-                               EXISTS (
-                                 SELECT 1
-                                 FROM metadata.bronze_event_tables t
-                                 WHERE t.enabled = TRUE
-                                   AND t.project_id = s.project_id
-                                   AND lower(t.dataset) = lower(s.target_dataset)
-                                   AND lower(t.table_name) = lower(s.target_table_name)
+                               (
+                                 NULLIF(btrim(s.target_dataset), '') IS NOT NULL
+                                 AND NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                                ) AS target_ready,
                                s.query_filter_json,
                                s.enabled,
@@ -148,7 +140,7 @@ class PgStore:
                         raise
                     logging.warning(
                         "Target routing metadata is incomplete; all sources will be skipped. "
-                        "Apply control-plane migration for opensearch_sources target columns and bronze_event_tables."
+                        "Apply control-plane migration for opensearch_sources target columns."
                     )
                     cur.execute(
                         """
@@ -445,9 +437,12 @@ class ClickHouseWriter:
         self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(gold_db)}")
 
         table = f"{quote_identifier(bronze_db)}.{quote_identifier('os_events_raw')}"
+        self._ensure_raw_table(table)
+
+    def _ensure_raw_table(self, qualified_table: str) -> None:
         self.execute_sql(
             f"""
-            CREATE TABLE IF NOT EXISTS {table} (
+            CREATE TABLE IF NOT EXISTS {qualified_table} (
               event_id String,
               event_ts DateTime64(3),
               index_name String,
@@ -461,6 +456,13 @@ class ClickHouseWriter:
             ORDER BY (source_id, toDate(event_ts), event_ts, event_id)
             """
         )
+
+    def ensure_target_raw_table(self, db_prefix: str, table_name: str) -> None:
+        require_identifier(db_prefix)
+        require_identifier(table_name)
+        bronze_db = f"{db_prefix}_bronze"
+        qualified_table = f"{quote_identifier(bronze_db)}.{quote_identifier(table_name)}"
+        self._ensure_raw_table(qualified_table)
 
     def insert_rows(self, database: str, table: str, rows: List[Dict[str, Any]]) -> None:
         if not rows:
@@ -796,6 +798,7 @@ def _retry_clickhouse(
 def _process_hits(
     writer: ClickHouseWriter,
     database: str,
+    target_table_name: str,
     hits: List[Dict[str, Any]],
     time_field: str,
     source_id: int,
@@ -804,7 +807,7 @@ def _process_hits(
         return None, None, None, 0
     rows = _build_rows(hits, time_field, source_id)
     if rows:
-        _retry_clickhouse(writer, database, "os_events_raw", rows)
+        _retry_clickhouse(writer, database, target_table_name, rows)
     last_hit = hits[-1]
     last_ts = _extract_event_ts(last_hit, time_field)
     last_sort = last_hit.get("sort")
@@ -863,6 +866,7 @@ def _process_index(
             last_ts, last_sort, last_id, written = _process_hits(
                 writer,
                 f"{source['db_prefix']}_bronze",
+                source["target_table_name"],
                 hits,
                 time_field,
                 source["source_id"],
@@ -1003,6 +1007,19 @@ def _ensure_project_storage(writer: ClickHouseWriter, db_prefix: str) -> None:
         raise
 
 
+def _ensure_target_table_storage(writer: ClickHouseWriter, db_prefix: str, table_name: str) -> None:
+    try:
+        writer.ensure_target_raw_table(db_prefix, table_name)
+    except Exception as exc:
+        logging.error(
+            "Failed to ensure target table storage for db_prefix=%s table=%s: %s",
+            db_prefix,
+            table_name,
+            exc,
+        )
+        raise
+
+
 def _build_os_client(source: Dict[str, Any]) -> OpenSearchClient:
     secret = _load_secret(source.get("secret_ref"), source.get("secret_enc"))
     return OpenSearchClient(
@@ -1045,9 +1062,8 @@ def run_once() -> None:
         skipped_sources: List[Dict[str, Any]] = []
         namespace_owner: Dict[str, Any] = {}
         for source in sources:
-            target_dataset = str(source.get("target_dataset") or "").strip()
-            target_table_name = str(source.get("target_table_name") or "").strip()
-            target_ready = bool(source.get("target_ready"))
+            target_dataset = str(source.get("target_dataset") or "").strip().lower()
+            target_table_name = str(source.get("target_table_name") or "").strip().lower()
             db_prefix = _resolve_clickhouse_namespace(
                 source.get("clickhouse_namespace"),
                 source.get("project_name"),
@@ -1090,8 +1106,11 @@ def run_once() -> None:
                     }
                 )
                 continue
-            if not target_ready:
-                reason = "target dataset/table is not defined in bronze_event_tables"
+            try:
+                require_identifier(target_dataset)
+                require_identifier(target_table_name)
+            except ValueError as exc:
+                reason = f"invalid target dataset/table identifier: {exc}"
                 logging.warning(
                     "Skipping source %s (%s): %s",
                     source.get("source_id"),
@@ -1107,6 +1126,8 @@ def run_once() -> None:
                 )
                 continue
             source["db_prefix"] = db_prefix
+            source["target_dataset"] = target_dataset
+            source["target_table_name"] = target_table_name
             eligible_sources.append(source)
 
         if not eligible_sources:
@@ -1114,6 +1135,7 @@ def run_once() -> None:
 
         for source in eligible_sources:
             _ensure_project_storage(writer, source["db_prefix"])
+            _ensure_target_table_storage(writer, source["db_prefix"], source["target_table_name"])
             os_client = _build_os_client(source)
             job = store.fetch_backfill_job(source["source_id"])
             if job:

@@ -41,6 +41,33 @@ def _derive_clickhouse_namespace(project_id: str, name: str, explicit: str) -> s
     return namespace
 
 
+def _is_safe_identifier(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z0-9_]+$", value or ""))
+
+
+def _fetch_target_tables(project_id: str) -> list[str]:
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT DISTINCT lower(target_table_name) AS target_table_name
+            FROM metadata.opensearch_sources
+            WHERE project_id = %s
+              AND enabled = TRUE
+              AND NULLIF(btrim(target_table_name), '') IS NOT NULL
+            ORDER BY 1
+            """,
+            (project_id,),
+        )
+    except Exception:
+        rows = []
+    tables = [
+        str(row.get("target_table_name") or "").strip()
+        for row in rows
+        if _is_safe_identifier(str(row.get("target_table_name") or "").strip())
+    ]
+    return sorted(set(tables))
+
+
 def metric_card(label: str, value: str, caption: str = "", accent: str = "#38bdf8") -> None:
     st.markdown(
         f"""
@@ -143,19 +170,35 @@ selected_project = st.selectbox(
 
 if selected_project and selected_project != "no-projects":
     selected_project_db = project_db.get(selected_project, selected_project)
+    target_tables = _fetch_target_tables(selected_project)
+    if not target_tables:
+        st.info("No target tables configured for this project.")
+        target_tables = []
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Events per Hour**")
         try:
-            rows = clickhouse.query_rows(
-                f"""
-                SELECT toStartOfHour(event_ts) AS hour, count() AS events
-                FROM {selected_project_db}_bronze.os_events_raw
-                WHERE event_ts >= now() - INTERVAL 24 HOUR
-                GROUP BY hour
-                ORDER BY hour
-                """
-            )
+            if not target_tables:
+                rows = []
+            else:
+                union_sql = " UNION ALL ".join(
+                    [
+                        (
+                            f"SELECT event_ts "
+                            f"FROM `{selected_project_db}_bronze`.`{table_name}` "
+                            "WHERE event_ts >= now() - INTERVAL 24 HOUR"
+                        )
+                        for table_name in target_tables
+                    ]
+                )
+                rows = clickhouse.query_rows(
+                    f"""
+                    SELECT toStartOfHour(event_ts) AS hour, count() AS events
+                    FROM ({union_sql})
+                    GROUP BY hour
+                    ORDER BY hour
+                    """
+                )
             if rows:
                 events_df = pd.DataFrame(rows)
                 events_df["hour"] = pd.to_datetime(events_df["hour"])
@@ -168,16 +211,28 @@ if selected_project and selected_project != "no-projects":
     with col2:
         st.markdown("**Ingestion Lag (minutes)**")
         try:
-            lag_rows = clickhouse.query_rows(
-                f"""
-                SELECT toStartOfHour(ingested_at) AS hour,
-                       avg(dateDiff('minute', event_ts, ingested_at)) AS lag_minutes
-                FROM {selected_project_db}_bronze.os_events_raw
-                WHERE ingested_at >= now() - INTERVAL 24 HOUR
-                GROUP BY hour
-                ORDER BY hour
-                """
-            )
+            if not target_tables:
+                lag_rows = []
+            else:
+                union_sql = " UNION ALL ".join(
+                    [
+                        (
+                            f"SELECT event_ts, ingested_at "
+                            f"FROM `{selected_project_db}_bronze`.`{table_name}` "
+                            "WHERE ingested_at >= now() - INTERVAL 24 HOUR"
+                        )
+                        for table_name in target_tables
+                    ]
+                )
+                lag_rows = clickhouse.query_rows(
+                    f"""
+                    SELECT toStartOfHour(ingested_at) AS hour,
+                           avg(dateDiff('minute', event_ts, ingested_at)) AS lag_minutes
+                    FROM ({union_sql})
+                    GROUP BY hour
+                    ORDER BY hour
+                    """
+                )
             if lag_rows:
                 lag_df = pd.DataFrame(lag_rows)
                 lag_df["hour"] = pd.to_datetime(lag_df["hour"])
