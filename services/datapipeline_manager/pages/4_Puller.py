@@ -342,6 +342,64 @@ with tabs[0]:
             except Exception as exc:
                 st.error(f"Save failed: {exc}")
 
+    st.markdown("### Define Target Table For Existing Source")
+    if HAS_TARGET_ROUTING:
+        existing_options = [
+            (str(row["source_id"]), f"{row['project_id']} / {row['name']} (id={row['source_id']})")
+            for row in sources
+        ]
+        if existing_options:
+            option_labels = [label for _, label in existing_options]
+            selected_label = st.selectbox(
+                "Existing Source",
+                options=option_labels,
+                key="puller_existing_source_target",
+            )
+            selected_id = next(
+                (source_id for source_id, label in existing_options if label == selected_label),
+                None,
+            )
+            selected_row = next(
+                (row for row in sources if str(row["source_id"]) == str(selected_id)),
+                None,
+            )
+            with st.form("puller_set_target_table_form"):
+                target_table_existing = st.text_input(
+                    "Target Table Name",
+                    value=(selected_row.get("target_table_name") if selected_row else "") or "",
+                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
+                )
+                submitted_target = st.form_submit_button("Save Target Table")
+            if submitted_target:
+                target_table_norm = (target_table_existing or "").strip().lower()
+                if not target_table_norm:
+                    st.error("Target Table Name is required.")
+                elif not _is_safe_identifier(target_table_norm):
+                    st.error("Target Table must be alphanumeric + underscore.")
+                else:
+                    try:
+                        db.execute(
+                            """
+                            UPDATE metadata.opensearch_sources
+                            SET target_dataset = %s,
+                                target_table_name = %s,
+                                updated_at = now()
+                            WHERE source_id = %s
+                            """,
+                            ("default", target_table_norm, selected_id),
+                        )
+                        ui.notify("Target table updated.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Update failed: {exc}")
+        else:
+            st.info("No sources available. Create one in Sources or Puller Add Source first.")
+    else:
+        st.info(
+            "Target routing columns are missing. Run metadata migration "
+            "for `target_dataset` and `target_table_name`."
+        )
+
     st.markdown("### Existing Sources")
     if sources:
         display_rows = [

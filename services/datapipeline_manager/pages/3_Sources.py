@@ -81,11 +81,6 @@ tabs = st.tabs(["Add / Edit", "Source List"])
 
 with tabs[0]:
     st.markdown("### Source Wizard")
-    if not HAS_TARGET_ROUTING:
-        st.warning(
-            "Target routing columns are missing. Run the control-plane migration "
-            "(`target_dataset`, `target_table_name`) to enable per-table routing."
-        )
     source_ids = ["new"] + [str(row["source_id"]) for row in sources]
     selected_id = st.selectbox("Select source to edit", source_ids)
     current = next(
@@ -152,16 +147,7 @@ with tabs[0]:
             time_field = st.text_input(
                 "Time Field", value=current["time_field"] if current else "@timestamp"
             )
-            target_dataset = ((current.get("target_dataset") if current else "default") or "default")
-            target_table_name = ""
-            if HAS_TARGET_ROUTING:
-                target_table_name = st.text_input(
-                    "Target Table Name",
-                    value=(current.get("target_table_name") if current else "") or "",
-                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
-                )
-                if target_table_name:
-                    st.caption(f"Write target: `<project_namespace>_bronze.{target_table_name}`")
+            st.caption("Target table mapping is configured in the Puller menu.")
 
         with st.expander("Step 3: Filters", expanded=False):
             query_filter_json = st.text_area(
@@ -208,15 +194,8 @@ with tabs[0]:
 
     if submit:
         query_filter = ui.parse_json(query_filter_json)
-        target_dataset_norm = (target_dataset or "default").strip().lower() if HAS_TARGET_ROUTING else ""
-        target_table_norm = (target_table_name or "").strip().lower() if HAS_TARGET_ROUTING else ""
         if query_filter is None:
             st.error("Query filter JSON is invalid.")
-        elif not HAS_TARGET_ROUTING:
-            st.error(
-                "Target routing columns are missing. Run the metadata migration "
-                "(`target_dataset`, `target_table_name`) first."
-            )
         elif not name or not base_url or not index_pattern or not time_field:
             st.error("Name, base URL, index pattern, and time field are required.")
         elif auth_type != "none" and secret_mode == "secret_ref" and not secret_ref:
@@ -226,10 +205,6 @@ with tabs[0]:
             st.error(f"{label} is required for the selected auth type.")
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
-        elif not target_table_norm:
-            st.error("Target Table Name is required.")
-        elif target_table_norm and not _is_safe_identifier(target_table_norm):
-            st.error("Target Table must be alphanumeric + underscore.")
         else:
             secret_ref_value = None
             secret_enc_value = None
@@ -247,135 +222,67 @@ with tabs[0]:
             )
             try:
                 if current:
-                    if HAS_TARGET_ROUTING:
-                        rowcount = db.execute(
-                            """
-                            UPDATE metadata.opensearch_sources
-                            SET project_id = %s,
-                                name = %s,
-                                base_url = %s,
-                                auth_type = %s,
-                                username = %s,
-                                secret_ref = %s,
-                                secret_enc = %s,
-                                index_pattern = %s,
-                                time_field = %s,
-                                target_dataset = %s,
-                                target_table_name = %s,
-                                query_filter_json = %s,
-                                enabled = %s,
-                                updated_at = now()
-                            WHERE source_id = %s
-                              AND updated_at = %s
-                            """,
-                            (
-                                project_id,
-                                name,
-                                base_url,
-                                None if auth_type == "none" else auth_type,
-                                username,
-                                secret_ref_value,
-                                secret_enc_param,
-                                index_pattern,
-                                time_field,
-                                target_dataset_norm or None,
-                                target_table_norm or None,
-                                json.dumps(query_filter),
-                                enabled,
-                                current["source_id"],
-                                current["updated_at"],
-                            ),
-                        )
-                    else:
-                        rowcount = db.execute(
-                            """
-                            UPDATE metadata.opensearch_sources
-                            SET project_id = %s,
-                                name = %s,
-                                base_url = %s,
-                                auth_type = %s,
-                                username = %s,
-                                secret_ref = %s,
-                                secret_enc = %s,
-                                index_pattern = %s,
-                                time_field = %s,
-                                query_filter_json = %s,
-                                enabled = %s,
-                                updated_at = now()
-                            WHERE source_id = %s
-                              AND updated_at = %s
-                            """,
-                            (
-                                project_id,
-                                name,
-                                base_url,
-                                None if auth_type == "none" else auth_type,
-                                username,
-                                secret_ref_value,
-                                secret_enc_param,
-                                index_pattern,
-                                time_field,
-                                json.dumps(query_filter),
-                                enabled,
-                                current["source_id"],
-                                current["updated_at"],
-                            ),
-                        )
+                    rowcount = db.execute(
+                        """
+                        UPDATE metadata.opensearch_sources
+                        SET project_id = %s,
+                            name = %s,
+                            base_url = %s,
+                            auth_type = %s,
+                            username = %s,
+                            secret_ref = %s,
+                            secret_enc = %s,
+                            index_pattern = %s,
+                            time_field = %s,
+                            query_filter_json = %s,
+                            enabled = %s,
+                            updated_at = now()
+                        WHERE source_id = %s
+                          AND updated_at = %s
+                        """,
+                        (
+                            project_id,
+                            name,
+                            base_url,
+                            None if auth_type == "none" else auth_type,
+                            username,
+                            secret_ref_value,
+                            secret_enc_param,
+                            index_pattern,
+                            time_field,
+                            json.dumps(query_filter),
+                            enabled,
+                            current["source_id"],
+                            current["updated_at"],
+                        ),
+                    )
                     if rowcount == 0:
                         st.error("Update conflict: source was modified by another user.")
                     else:
                         ui.notify("Source updated.")
                         st.rerun()
                 else:
-                    if HAS_TARGET_ROUTING:
-                        db.execute(
-                            """
-                            INSERT INTO metadata.opensearch_sources (
-                              project_id, name, base_url, auth_type, username, secret_ref,
-                              secret_enc, index_pattern, time_field, target_dataset, target_table_name,
-                              query_filter_json, enabled, created_at, updated_at
-                            ) VALUES (
-                              %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
-                            )
-                            """,
-                            (
-                                project_id,
-                                name,
-                                base_url,
-                                None if auth_type == "none" else auth_type,
-                                username,
-                                secret_ref_value,
-                                secret_enc_param,
-                                index_pattern,
-                                time_field,
-                                target_dataset_norm or None,
-                                target_table_norm or None,
-                                json.dumps(query_filter),
-                                enabled,
-                            ),
-                        )
-                    else:
-                        db.execute(
-                            """
-                            INSERT INTO metadata.opensearch_sources (
-                              project_id, name, base_url, auth_type, username, secret_ref,
-                              secret_enc, index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-                            """,
-                            (
-                                project_id,
-                                name,
-                                base_url,
-                                None if auth_type == "none" else auth_type,
-                                username,
-                                secret_ref_value,
-                                secret_enc_param,
-                                index_pattern,
-                                time_field,
-                                json.dumps(query_filter),
-                                enabled,
-                            ),
-                        )
+                    db.execute(
+                        """
+                        INSERT INTO metadata.opensearch_sources (
+                          project_id, name, base_url, auth_type, username, secret_ref,
+                          secret_enc, index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                        """,
+                        (
+                            project_id,
+                            name,
+                            base_url,
+                            None if auth_type == "none" else auth_type,
+                            username,
+                            secret_ref_value,
+                            secret_enc_param,
+                            index_pattern,
+                            time_field,
+                            json.dumps(query_filter),
+                            enabled,
+                        ),
+                    )
                     ui.notify("Source created.")
                     st.rerun()
             except Exception as exc:
@@ -402,6 +309,8 @@ with tabs[1]:
             filtered.append(row)
 
     df = pd.DataFrame(filtered)
+    if not df.empty:
+        df = df.drop(columns=["target_dataset", "target_table_name"], errors="ignore")
     page_size = st.selectbox("Rows per page", [10, 20, 50], index=1)
     total_pages = max(1, (len(df) + page_size - 1) // page_size)
     page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="source_page")
