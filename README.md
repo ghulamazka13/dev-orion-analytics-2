@@ -13,7 +13,7 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 - Schema Migrator (ClickHouse DDL from metadata)
 
 ## Dataflow
-- OpenSearch index -> OpenSearch Puller -> `<project_id>_bronze.os_events_raw`
+- OpenSearch index -> OpenSearch Puller -> `<clickhouse_namespace>_bronze.os_events_raw`
 - Schema Migrator + Bronze Tables metadata -> project bronze parsed tables
 - Airflow executes SQL templates in `airflow/dags/sql` based on Postgres metadata
 - Gold star schema (dims, facts, bridges) in `gold.*`
@@ -199,6 +199,7 @@ If the control-plane tables already exist, apply the new columns as needed:
 
 ```sql
 ALTER TABLE metadata.backfill_jobs ADD COLUMN IF NOT EXISTS throttle_seconds INTEGER;
+ALTER TABLE metadata.projects ADD COLUMN IF NOT EXISTS clickhouse_namespace TEXT;
 ALTER TABLE metadata.opensearch_sources ADD COLUMN IF NOT EXISTS target_dataset TEXT;
 ALTER TABLE metadata.opensearch_sources ADD COLUMN IF NOT EXISTS target_table_name TEXT;
 CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
@@ -211,14 +212,17 @@ CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
 ```
 
 ### 1) Create a project
-Projects map to ClickHouse databases `<project_id>_bronze` and `<project_id>_gold`.
+Projects map to ClickHouse databases `<clickhouse_namespace>_bronze` and `<clickhouse_namespace>_gold`.
 Use ITSEC Datapipeline Manager (http://localhost:18090) or SQL:
 
 ```sql
-INSERT INTO metadata.projects (project_id, name, timezone, retention_days)
-VALUES ('acme', 'ACME Corp', 'UTC', 90)
+INSERT INTO metadata.projects (project_id, name, clickhouse_namespace, timezone, retention_days)
+VALUES ('acme', 'ACME Corp', 'acme', 'UTC', 90)
 ON CONFLICT (project_id) DO NOTHING;
 ```
+
+If `clickhouse_namespace` is omitted in UI, the app uses `project_id` when it starts with a letter;
+otherwise it falls back to `project_name` and adds `p_` when needed.
 
 ### 2) Add an OpenSearch source
 Secrets are stored via `secret_ref` (file path mounted into containers).
@@ -326,14 +330,14 @@ Upgrade tip: if you previously ran the old Source Manager container, use:
 `docker compose up -d --build --remove-orphans`
 
 User flow (typical):
-1) Projects: create a project (`project_id` becomes `<project_id>_bronze` and `<project_id>_gold`).
+1) Projects: create a project (ClickHouse uses `clickhouse_namespace` as `<clickhouse_namespace>_bronze` and `<clickhouse_namespace>_gold`).
 2) Puller: add OpenSearch sources, adjust polling config, and monitor ingestion health.
    (You can also use the Sources page for full source editing.)
 3) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
 4) Backfill: queue historical loads if needed.
 5) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
 6) Bronze Parsing: create per-project bronze tables (zeek/wazuh/suricata) sourced from
-   `<project_id>_bronze.os_events_raw`, then click "Apply Schema Changes" to build tables + materialized views.
+   `<clickhouse_namespace>_bronze.os_events_raw`, then click "Apply Schema Changes" to build tables + materialized views.
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.
