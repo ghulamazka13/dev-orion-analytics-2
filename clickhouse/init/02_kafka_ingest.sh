@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+enable_kafka_ingest="${ENABLE_KAFKA_INGEST:-false}"
+if [ "$enable_kafka_ingest" != "true" ]; then
+  echo "Skipping legacy Kafka ingest bootstrap (ENABLE_KAFKA_INGEST=$enable_kafka_ingest)"
+  exit 0
+fi
+
 broker_list="${KAFKA_BROKER_LIST:-10.110.12.20:9092}"
 topic_list="${KAFKA_TOPIC_LIST:-malcolm-logs}"
 
