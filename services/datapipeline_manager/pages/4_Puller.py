@@ -67,17 +67,62 @@ def _fetch_puller_config():
         return None, exc
 
 
+def _has_target_routing_columns() -> bool:
+    try:
+        row = db.fetch_one(
+            """
+            SELECT count(*) AS count
+            FROM information_schema.columns
+            WHERE table_schema = 'metadata'
+              AND table_name = 'opensearch_sources'
+              AND column_name IN ('target_dataset', 'target_table_name')
+            """
+        )
+        return bool(row and int(row.get("count", 0)) >= 2)
+    except Exception:
+        return False
+
+
+HAS_TARGET_ROUTING = _has_target_routing_columns()
+
+
 projects = db.fetch_all("SELECT project_id FROM metadata.projects ORDER BY project_id")
 project_ids = [row["project_id"] for row in projects]
 
-sources = db.fetch_all(
-    """
-    SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
-           index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
-    FROM metadata.opensearch_sources
-    ORDER BY source_id
-    """
-)
+try:
+    bronze_tables = db.fetch_all(
+        """
+        SELECT project_id, dataset, table_name
+        FROM metadata.bronze_event_tables
+        WHERE enabled = TRUE
+        ORDER BY project_id, dataset, table_name
+        """
+    )
+except Exception:
+    bronze_tables = []
+
+if HAS_TARGET_ROUTING:
+    sources = db.fetch_all(
+        """
+        SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
+               index_pattern, time_field, target_dataset, target_table_name,
+               query_filter_json, enabled, created_at, updated_at
+        FROM metadata.opensearch_sources
+        ORDER BY source_id
+        """
+    )
+else:
+    sources = db.fetch_all(
+        """
+        SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
+               index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
+        FROM metadata.opensearch_sources
+        ORDER BY source_id
+        """
+    )
+    for row in sources:
+        row["target_dataset"] = None
+        row["target_table_name"] = None
 
 
 tabs = st.tabs(["Add Source", "Puller Config", "Monitoring"])
@@ -85,6 +130,11 @@ tabs = st.tabs(["Add Source", "Puller Config", "Monitoring"])
 with tabs[0]:
     st.markdown("### Add OpenSearch Source")
     st.caption("Create a new ingestion pipeline when a new OpenSearch source appears.")
+    if not HAS_TARGET_ROUTING:
+        st.warning(
+            "Kolom target routing belum ada. Jalankan migration control-plane "
+            "(`target_dataset`, `target_table_name`) untuk mengaktifkan routing per tabel."
+        )
 
     with st.form("puller_add_source"):
         project_id = st.selectbox(
@@ -120,6 +170,34 @@ with tabs[0]:
         with st.expander("Step 2: Indexing", expanded=True):
             index_pattern = st.text_input("Index Pattern", value="")
             time_field = st.text_input("Time Field", value="@timestamp")
+            target_dataset = ""
+            target_table_name = ""
+            if HAS_TARGET_ROUTING:
+                project_table_rows = [
+                    row for row in bronze_tables if row.get("project_id") == project_id
+                ]
+                target_option_map = {
+                    f"{row['dataset']} -> {row['table_name']}": row
+                    for row in project_table_rows
+                }
+                if target_option_map:
+                    selected_target = st.selectbox(
+                        "Target Bronze Schema",
+                        options=list(target_option_map.keys()),
+                        help=(
+                            "Wajib pilih schema tujuan. Source tidak akan diproses puller "
+                            "tanpa target dataset+tabel yang valid."
+                        ),
+                    )
+                    selected_target_row = target_option_map[selected_target]
+                    target_dataset = (selected_target_row or {}).get("dataset") or ""
+                    target_table_name = (selected_target_row or {}).get("table_name") or ""
+                    st.caption(f"Routing target: `{target_dataset}` -> `{target_table_name}`")
+                else:
+                    st.warning(
+                        "Belum ada Bronze Schema aktif untuk project ini. "
+                        "Buat dulu di menu Bronze Tables."
+                    )
 
         with st.expander("Step 3: Filters", expanded=False):
             query_filter_json = st.text_area("Query Filter JSON", value="{}", height=80)
@@ -161,8 +239,15 @@ with tabs[0]:
 
     if submit:
         query_filter = ui.parse_json(query_filter_json)
+        target_dataset_norm = (target_dataset or "").strip().lower() if HAS_TARGET_ROUTING else ""
+        target_table_norm = (target_table_name or "").strip().lower() if HAS_TARGET_ROUTING else ""
         if query_filter is None:
             st.error("Query filter JSON is invalid.")
+        elif not HAS_TARGET_ROUTING:
+            st.error(
+                "Target routing columns belum ada. Jalankan migration metadata "
+                "(`target_dataset`, `target_table_name`) terlebih dahulu."
+            )
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
         elif not name or not base_url or not index_pattern or not time_field:
@@ -172,6 +257,19 @@ with tabs[0]:
         elif auth_type != "none" and secret_mode == "stored" and not secret:
             label = "Password" if auth_type == "basic" else "Secret"
             st.error(f"{label} is required for the selected auth type.")
+        elif not target_dataset_norm or not target_table_norm:
+            st.error("Target Bronze Schema wajib dipilih.")
+        elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
+            st.error("Target Dataset must be alphanumeric + underscore.")
+        elif target_table_norm and not _is_safe_identifier(target_table_norm):
+            st.error("Target Table must be alphanumeric + underscore.")
+        elif target_dataset_norm and target_table_norm and not any(
+            (row.get("project_id") == project_id)
+            and ((row.get("dataset") or "").lower() == target_dataset_norm)
+            and ((row.get("table_name") or "").lower() == target_table_norm)
+            for row in bronze_tables
+        ):
+            st.error("Target schema belum ada di Bronze Tables.")
         else:
             secret_ref_value = None
             secret_enc_value = None
@@ -184,28 +282,57 @@ with tabs[0]:
                 psycopg2.Binary(secret_enc_value) if secret_enc_value is not None else None
             )
             try:
-                db.execute(
-                    """
-                    INSERT INTO metadata.opensearch_sources (
-                      project_id, name, base_url, auth_type, username, secret_ref,
-                      secret_enc, index_pattern, time_field, query_filter_json,
-                      enabled, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-                    """,
-                    (
-                        project_id,
-                        name,
-                        base_url,
-                        None if auth_type == "none" else auth_type,
-                        username,
-                        secret_ref_value,
-                        secret_enc_param,
-                        index_pattern,
-                        time_field,
-                        json.dumps(query_filter),
-                        enabled,
-                    ),
-                )
+                if HAS_TARGET_ROUTING:
+                    db.execute(
+                        """
+                        INSERT INTO metadata.opensearch_sources (
+                          project_id, name, base_url, auth_type, username, secret_ref,
+                          secret_enc, index_pattern, time_field, target_dataset, target_table_name,
+                          query_filter_json,
+                          enabled, created_at, updated_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
+                        )
+                        """,
+                        (
+                            project_id,
+                            name,
+                            base_url,
+                            None if auth_type == "none" else auth_type,
+                            username,
+                            secret_ref_value,
+                            secret_enc_param,
+                            index_pattern,
+                            time_field,
+                            target_dataset_norm or None,
+                            target_table_norm or None,
+                            json.dumps(query_filter),
+                            enabled,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """
+                        INSERT INTO metadata.opensearch_sources (
+                          project_id, name, base_url, auth_type, username, secret_ref,
+                          secret_enc, index_pattern, time_field, query_filter_json,
+                          enabled, created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                        """,
+                        (
+                            project_id,
+                            name,
+                            base_url,
+                            None if auth_type == "none" else auth_type,
+                            username,
+                            secret_ref_value,
+                            secret_enc_param,
+                            index_pattern,
+                            time_field,
+                            json.dumps(query_filter),
+                            enabled,
+                        ),
+                    )
                 ui.notify("Source created.")
                 st.rerun()
             except Exception as exc:
@@ -385,23 +512,46 @@ with tabs[2]:
         st.info("No heartbeat details available yet.")
 
     st.markdown("### Ingestion Overview")
-    ingestion_rows = db.fetch_all(
-        """
-        SELECT s.source_id,
-               s.project_id,
-               s.name,
-               s.enabled,
-               i.index_name,
-               i.last_ts,
-               i.updated_at,
-               i.status,
-               i.last_error
-        FROM metadata.opensearch_sources s
-        LEFT JOIN metadata.ingestion_state i
-          ON i.source_id = s.source_id
-        ORDER BY s.project_id, s.name, i.index_name
-        """
-    )
+    if HAS_TARGET_ROUTING:
+        ingestion_rows = db.fetch_all(
+            """
+            SELECT s.source_id,
+                   s.project_id,
+                   s.name,
+                   s.enabled,
+                   s.target_dataset,
+                   s.target_table_name,
+                   i.index_name,
+                   i.last_ts,
+                   i.updated_at,
+                   i.status,
+                   i.last_error
+            FROM metadata.opensearch_sources s
+            LEFT JOIN metadata.ingestion_state i
+              ON i.source_id = s.source_id
+            ORDER BY s.project_id, s.name, i.index_name
+            """
+        )
+    else:
+        ingestion_rows = db.fetch_all(
+            """
+            SELECT s.source_id,
+                   s.project_id,
+                   s.name,
+                   s.enabled,
+                   NULL::text AS target_dataset,
+                   NULL::text AS target_table_name,
+                   i.index_name,
+                   i.last_ts,
+                   i.updated_at,
+                   i.status,
+                   i.last_error
+            FROM metadata.opensearch_sources s
+            LEFT JOIN metadata.ingestion_state i
+              ON i.source_id = s.source_id
+            ORDER BY s.project_id, s.name, i.index_name
+            """
+        )
 
     enriched = []
     for row in ingestion_rows:

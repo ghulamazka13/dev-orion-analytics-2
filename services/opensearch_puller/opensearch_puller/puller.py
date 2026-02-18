@@ -32,29 +32,75 @@ class PgStore:
 
     def fetch_sources(self) -> List[Dict]:
         with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT s.source_id,
-                       s.project_id,
-                       s.name,
-                       s.base_url,
-                       s.auth_type,
-                       s.username,
-                       s.secret_ref,
-                       s.secret_enc,
-                       s.index_pattern,
-                       s.time_field,
-                       s.query_filter_json,
-                       s.enabled,
-                       p.timezone
-                FROM metadata.opensearch_sources s
-                JOIN metadata.projects p
-                  ON p.project_id = s.project_id
-                WHERE s.enabled = TRUE
-                  AND p.enabled = TRUE
-                ORDER BY s.source_id
-                """
-            )
+            try:
+                cur.execute(
+                    """
+                    SELECT s.source_id,
+                           s.project_id,
+                           s.name,
+                           s.base_url,
+                           s.auth_type,
+                           s.username,
+                           s.secret_ref,
+                           s.secret_enc,
+                           s.index_pattern,
+                           s.time_field,
+                           s.target_dataset,
+                           s.target_table_name,
+                           EXISTS (
+                             SELECT 1
+                             FROM metadata.bronze_event_tables t
+                             WHERE t.enabled = TRUE
+                               AND t.project_id = s.project_id
+                               AND lower(t.dataset) = lower(s.target_dataset)
+                               AND lower(t.table_name) = lower(s.target_table_name)
+                           ) AS target_ready,
+                           s.query_filter_json,
+                           s.enabled,
+                           p.timezone
+                    FROM metadata.opensearch_sources s
+                    JOIN metadata.projects p
+                      ON p.project_id = s.project_id
+                    WHERE s.enabled = TRUE
+                      AND p.enabled = TRUE
+                    ORDER BY s.source_id
+                    """
+                )
+            except psycopg2.Error as exc:
+                # Backward-compatible fallback for metadata schema without target routing columns.
+                self.conn.rollback()
+                if getattr(exc, "pgcode", None) not in {"42703", "42P01"}:
+                    raise
+                logging.warning(
+                    "Target routing metadata is incomplete; all sources will be skipped. "
+                    "Apply control-plane migration for opensearch_sources target columns and bronze_event_tables."
+                )
+                cur.execute(
+                    """
+                    SELECT s.source_id,
+                           s.project_id,
+                           s.name,
+                           s.base_url,
+                           s.auth_type,
+                           s.username,
+                           s.secret_ref,
+                           s.secret_enc,
+                           s.index_pattern,
+                           s.time_field,
+                           NULL::text AS target_dataset,
+                           NULL::text AS target_table_name,
+                           FALSE AS target_ready,
+                           s.query_filter_json,
+                           s.enabled,
+                           p.timezone
+                    FROM metadata.opensearch_sources s
+                    JOIN metadata.projects p
+                      ON p.project_id = s.project_id
+                    WHERE s.enabled = TRUE
+                      AND p.enabled = TRUE
+                    ORDER BY s.source_id
+                    """
+                )
             return list(cur.fetchall())
 
     def fetch_puller_config(self) -> Optional[Dict]:
@@ -918,7 +964,50 @@ def run_once() -> None:
 
         writer.ensure_default_bronze_columns()
 
+        eligible_sources: List[Dict[str, Any]] = []
+        skipped_sources: List[Dict[str, Any]] = []
         for source in sources:
+            target_dataset = str(source.get("target_dataset") or "").strip()
+            target_table_name = str(source.get("target_table_name") or "").strip()
+            target_ready = bool(source.get("target_ready"))
+            if not target_dataset or not target_table_name:
+                reason = "target dataset/table is not set"
+                logging.warning(
+                    "Skipping source %s (%s): %s",
+                    source.get("source_id"),
+                    source.get("name"),
+                    reason,
+                )
+                skipped_sources.append(
+                    {
+                        "source_id": source.get("source_id"),
+                        "name": source.get("name"),
+                        "reason": reason,
+                    }
+                )
+                continue
+            if not target_ready:
+                reason = "target dataset/table is not defined in bronze_event_tables"
+                logging.warning(
+                    "Skipping source %s (%s): %s",
+                    source.get("source_id"),
+                    source.get("name"),
+                    reason,
+                )
+                skipped_sources.append(
+                    {
+                        "source_id": source.get("source_id"),
+                        "name": source.get("name"),
+                        "reason": reason,
+                    }
+                )
+                continue
+            eligible_sources.append(source)
+
+        if not eligible_sources:
+            logging.warning("No eligible OpenSearch sources with valid target mapping")
+
+        for source in eligible_sources:
             _ensure_project_storage(writer, source["project_id"])
             os_client = _build_os_client(source)
             job = store.fetch_backfill_job(source["source_id"])
@@ -933,11 +1022,17 @@ def run_once() -> None:
 
             _process_incremental(store, writer, os_client, source)
         try:
+            details = _config_snapshot()
+            details["sources_total"] = len(sources)
+            details["sources_eligible"] = len(eligible_sources)
+            details["sources_skipped"] = len(skipped_sources)
+            if skipped_sources:
+                details["skipped_sources"] = skipped_sources[:20]
             store.upsert_worker_heartbeat(
                 config.WORKER_ID,
                 "opensearch_puller",
                 "idle",
-                _config_snapshot(),
+                details,
             )
         except Exception as exc:
             logging.warning("Unable to update worker heartbeat: %s", exc)

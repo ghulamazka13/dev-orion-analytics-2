@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS metadata.opensearch_sources (
   secret_enc BYTEA,
   index_pattern TEXT NOT NULL,
   time_field TEXT NOT NULL,
+  target_dataset TEXT,
+  target_table_name TEXT,
   query_filter_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -164,6 +166,10 @@ CREATE TABLE IF NOT EXISTS metadata.bronze_event_fields (
     ON DELETE CASCADE
 );
 
+ALTER TABLE IF EXISTS metadata.opensearch_sources
+  ADD COLUMN IF NOT EXISTS target_dataset TEXT,
+  ADD COLUMN IF NOT EXISTS target_table_name TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_ui_users_role
   ON metadata.ui_users (role);
 
@@ -178,6 +184,9 @@ CREATE INDEX IF NOT EXISTS idx_opensearch_sources_project
 
 CREATE INDEX IF NOT EXISTS idx_opensearch_sources_enabled
   ON metadata.opensearch_sources (enabled);
+
+CREATE INDEX IF NOT EXISTS idx_opensearch_sources_target
+  ON metadata.opensearch_sources (project_id, target_dataset, target_table_name);
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_state_status
   ON metadata.ingestion_state (status);

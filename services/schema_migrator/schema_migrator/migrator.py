@@ -44,19 +44,60 @@ def _fetch_field_registry(conn) -> List[Dict]:
 
 
 def _fetch_bronze_event_tables(conn) -> List[Dict]:
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    has_target_columns = False
+    with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT table_id,
-                   project_id,
-                   dataset,
-                   table_name,
-                   enabled
-            FROM metadata.bronze_event_tables
-            WHERE enabled = TRUE
-            ORDER BY table_id
+            SELECT count(*)::int
+            FROM information_schema.columns
+            WHERE table_schema = 'metadata'
+              AND table_name = 'opensearch_sources'
+              AND column_name IN ('target_dataset', 'target_table_name')
             """
         )
+        has_target_columns = (cur.fetchone() or [0])[0] >= 2
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if has_target_columns:
+            cur.execute(
+                """
+                SELECT t.table_id,
+                       t.project_id,
+                       t.dataset,
+                       t.table_name,
+                       t.enabled,
+                       TRUE AS routing_enabled,
+                       COALESCE(mapped.source_ids, ARRAY[]::text[]) AS source_ids
+                FROM metadata.bronze_event_tables t
+                LEFT JOIN LATERAL (
+                  SELECT array_agg(s.source_id::text ORDER BY s.source_id) AS source_ids
+                  FROM metadata.opensearch_sources s
+                  WHERE s.enabled = TRUE
+                    AND s.project_id = t.project_id
+                    AND NULLIF(btrim(s.target_dataset), '') IS NOT NULL
+                    AND NULLIF(btrim(s.target_table_name), '') IS NOT NULL
+                    AND lower(s.target_dataset) = lower(t.dataset)
+                    AND lower(s.target_table_name) = lower(t.table_name)
+                ) mapped ON TRUE
+                WHERE t.enabled = TRUE
+                ORDER BY t.table_id
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT table_id,
+                       project_id,
+                       dataset,
+                       table_name,
+                       enabled,
+                       FALSE AS routing_enabled,
+                       ARRAY[]::text[] AS source_ids
+                FROM metadata.bronze_event_tables
+                WHERE enabled = TRUE
+                ORDER BY table_id
+                """
+            )
         return list(cur.fetchall())
 
 
@@ -226,6 +267,21 @@ def _dataset_filter(dataset: str) -> str:
     return "1 = 1"
 
 
+def _source_filter(source_ids: Optional[List[str]]) -> Optional[str]:
+    if not source_ids:
+        return None
+    if isinstance(source_ids, str):
+        source_ids = [source_ids]
+    escaped = []
+    for source_id in source_ids:
+        value = str(source_id).strip()
+        if value:
+            escaped.append(f"'{_escape_literal(value)}'")
+    if not escaped:
+        return None
+    return f"source_id IN ({', '.join(escaped)})"
+
+
 def _apply_bronze_event_tables(
     ch: ClickHouseClient,
     table_rows: List[Dict],
@@ -242,6 +298,7 @@ def _apply_bronze_event_tables(
         table_id = table["table_id"]
         table_name = table["table_name"]
         dataset = table.get("dataset") or ""
+        source_filter = _source_filter(table.get("source_ids"))
         rows = fields_by_table.get(table_id, [])
         if not rows:
             if collect_results:
@@ -299,6 +356,23 @@ def _apply_bronze_event_tables(
                 source_table = f"{quote_identifier(bronze_db)}.{quote_identifier('os_events_raw')}"
                 mv_name = f"{table_name}_mv"
                 mv_table = f"{quote_identifier(bronze_db)}.{quote_identifier(mv_name)}"
+                if table.get("routing_enabled") and not source_filter:
+                    ch.execute(f"DROP TABLE IF EXISTS {mv_table}")
+                    if collect_results:
+                        results.append(
+                            {
+                                "table_id": table_id,
+                                "table": f"{bronze_db}.{table_name}",
+                                "source_filters": 0,
+                                "status": "skipped",
+                                "error": "no mapped source target",
+                            }
+                        )
+                    continue
+                where_clauses = [f"({_dataset_filter(dataset)})"]
+                if source_filter:
+                    where_clauses.append(source_filter)
+                where_sql = " AND ".join(where_clauses)
                 ch.execute(f"DROP TABLE IF EXISTS {mv_table}")
                 ch.execute(
                     f"""
@@ -308,7 +382,7 @@ def _apply_bronze_event_tables(
                     SELECT
                       {', '.join(select_exprs)}
                     FROM {source_table}
-                    WHERE {_dataset_filter(dataset)}
+                    WHERE {where_sql}
                     """
                 )
 
@@ -317,6 +391,7 @@ def _apply_bronze_event_tables(
                         {
                             "table_id": table_id,
                             "table": f"{bronze_db}.{table_name}",
+                            "source_filters": len(table.get("source_ids") or []),
                             "status": "applied",
                         }
                     )
