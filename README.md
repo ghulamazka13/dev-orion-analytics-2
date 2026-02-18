@@ -1,6 +1,6 @@
 ﻿# Malcolm Insight: Near Real-Time Security Analytics POC
 
-This repo is an end-to-end near real-time security analytics POC for Wazuh, Suricata, and Zeek logs. Kafka events are ingested into ClickHouse (bronze), Airflow runs SQL transforms into a gold star schema, and Superset or CHouse UI provides analytics.
+This repo is an end-to-end near real-time security analytics POC for Wazuh, Suricata, and Zeek logs. OpenSearch events are pulled into ClickHouse (bronze), Airflow runs SQL transforms into a gold star schema, and Superset or CHouse UI provides analytics.
 
 ## Stack
 - ClickHouse 24.3 (bronze + gold)
@@ -11,10 +11,10 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 - OpenSearch Puller (metadata-driven ingestion)
 - ITSEC Datapipeline Manager (Streamlit) for onboarding + field registry + monitoring
 - Schema Migrator (ClickHouse DDL from metadata)
-- External Kafka broker (not included in this compose)
 
 ## Dataflow
-- Kafka topic -> ClickHouse Kafka engine -> bronze.* raw tables
+- OpenSearch index -> OpenSearch Puller -> `<project_id>_bronze.os_events_raw`
+- Schema Migrator + Bronze Tables metadata -> project bronze parsed tables
 - Airflow executes SQL templates in `airflow/dags/sql` based on Postgres metadata
 - Gold star schema (dims, facts, bridges) in `gold.*`
 - Superset and CHouse UI query gold
@@ -77,23 +77,11 @@ Default credentials:
 
 Roles/users are defined in `clickhouse/init/00_databases.sql`.
 
-## ClickHouse ingestion (Kafka engine)
-- Kafka table: `bronze.security_events_kafka`
-- Materialized views: `bronze.suricata_events_mv`, `bronze.wazuh_events_mv`, `bronze.zeek_events_mv`
-- Default broker: `10.110.12.20:9092`
-- Default topic: `malcolm-logs`
-- Consumer group defaults to `security_events_ch_<suffix>` where `<suffix>` is:
-  - `KAFKA_GROUP_SUFFIX` if set
-  - otherwise `HOSTNAME` (from the container)
-  - otherwise `local`
-
-Override with environment variables before `docker compose up`:
-- `KAFKA_BROKER_LIST`
-- `KAFKA_TOPIC_LIST`
-- `KAFKA_GROUP_NAME` (full override)
-- `KAFKA_GROUP_SUFFIX` (suffix-only override)
-
-Note: Kafka/Redpanda is not part of this compose stack.
+## Ingestion mode
+- Default mode is OpenSearch-only.
+- Legacy Kafka bootstrap script is kept for compatibility but disabled by default.
+- To force-enable legacy Kafka bootstrap, set:
+  - `ENABLE_KAFKA_INGEST=true`
 
 ## Airflow gold pipeline
 - DAG: `gold_star_schema` (generated at runtime)
@@ -211,6 +199,8 @@ If the control-plane tables already exist, apply the new columns as needed:
 
 ```sql
 ALTER TABLE metadata.backfill_jobs ADD COLUMN IF NOT EXISTS throttle_seconds INTEGER;
+ALTER TABLE metadata.opensearch_sources ADD COLUMN IF NOT EXISTS target_dataset TEXT;
+ALTER TABLE metadata.opensearch_sources ADD COLUMN IF NOT EXISTS target_table_name TEXT;
 CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
   worker_id TEXT PRIMARY KEY,
   worker_type TEXT NOT NULL,
@@ -232,16 +222,18 @@ ON CONFLICT (project_id) DO NOTHING;
 
 ### 2) Add an OpenSearch source
 Secrets are stored via `secret_ref` (file path mounted into containers).
-Example:
+`target_dataset` + `target_table_name` are required for puller processing.
+Sources without a valid target mapping are skipped by `opensearch-puller`.
+Example (including routing target dataset/table):
 
 ```sql
 INSERT INTO metadata.opensearch_sources (
   project_id, name, base_url, auth_type, username,
-  secret_ref, index_pattern, time_field, query_filter_json
+  secret_ref, index_pattern, time_field, target_dataset, target_table_name, query_filter_json
 ) VALUES (
   'acme', 'acme-os', 'https://opensearch.acme.local:9200',
   'api_key', NULL, '/run/secrets/acme_os_key',
-  'logs-*', '@timestamp', '{}'::jsonb
+  'logs-*', '@timestamp', 'wazuh', 'wazuh_events_raw', '{}'::jsonb
 );
 ```
 
@@ -397,6 +389,6 @@ Get-Content scripts/postgres_gold_to_clickhouse_backfill.sql | \
 ```
 
 ## Troubleshooting
-- If Kafka ingestion is empty, verify the broker `10.110.12.20:9092` is reachable from the ClickHouse container and the topic has data.
+- If OpenSearch ingestion is empty, verify source config in `metadata.opensearch_sources`, puller health, and connectivity from `opensearch-puller` to the OpenSearch cluster.
 - If gold DAGs do not appear, check the metadata tables in Postgres and run `metadata_updater`.
 - If the gold DAG fails, check Airflow logs and ClickHouse permissions for `etl_runner`.
