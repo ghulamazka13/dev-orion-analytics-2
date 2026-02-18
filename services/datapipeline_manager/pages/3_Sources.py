@@ -95,8 +95,8 @@ with tabs[0]:
     st.markdown("### Source Wizard")
     if not HAS_TARGET_ROUTING:
         st.warning(
-            "Kolom target routing belum ada. Jalankan migration control-plane "
-            "(`target_dataset`, `target_table_name`) untuk mengaktifkan routing per tabel."
+            "Target routing columns are missing. Run the control-plane migration "
+            "(`target_dataset`, `target_table_name`) to enable per-table routing."
         )
     source_ids = ["new"] + [str(row["source_id"]) for row in sources]
     selected_id = st.selectbox("Select source to edit", source_ids)
@@ -190,8 +190,8 @@ with tabs[0]:
                         options=options,
                         index=options.index(current_target_label) if current_target_label in options else 0,
                         help=(
-                            "Wajib pilih schema tujuan. Source tidak akan diproses puller "
-                            "tanpa target dataset+tabel yang valid."
+                            "Selecting a target schema is required. The puller will skip this source "
+                            "without a valid target dataset+table."
                         ),
                     )
                     selected_target_row = target_option_map[selected_target]
@@ -200,8 +200,8 @@ with tabs[0]:
                     st.caption(f"Routing target: `{target_dataset}` -> `{target_table_name}`")
                 else:
                     st.warning(
-                        "Belum ada Bronze Schema aktif untuk project ini. "
-                        "Buat dulu di menu Bronze Tables."
+                        "There is no active Bronze Schema for this project yet. "
+                        "Create one first in the Bronze Tables menu."
                     )
 
         with st.expander("Step 3: Filters", expanded=False):
@@ -255,8 +255,8 @@ with tabs[0]:
             st.error("Query filter JSON is invalid.")
         elif not HAS_TARGET_ROUTING:
             st.error(
-                "Target routing columns belum ada. Jalankan migration metadata "
-                "(`target_dataset`, `target_table_name`) terlebih dahulu."
+                "Target routing columns are missing. Run the metadata migration "
+                "(`target_dataset`, `target_table_name`) first."
             )
         elif not name or not base_url or not index_pattern or not time_field:
             st.error("Name, base URL, index pattern, and time field are required.")
@@ -268,7 +268,7 @@ with tabs[0]:
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
         elif not target_dataset_norm or not target_table_norm:
-            st.error("Target Bronze Schema wajib dipilih.")
+            st.error("Target Bronze Schema is required.")
         elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
             st.error("Target Dataset must be alphanumeric + underscore.")
         elif target_table_norm and not _is_safe_identifier(target_table_norm):
@@ -279,7 +279,7 @@ with tabs[0]:
             and ((row.get("table_name") or "").lower() == target_table_norm)
             for row in bronze_tables
         ):
-            st.error("Target schema belum ada di Bronze Tables.")
+            st.error("Target schema is not defined in Bronze Tables.")
         else:
             secret_ref_value = None
             secret_enc_value = None

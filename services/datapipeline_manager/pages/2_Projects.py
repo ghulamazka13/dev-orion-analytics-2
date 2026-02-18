@@ -83,10 +83,10 @@ end = start + page_size
 st.dataframe(df.iloc[start:end] if not df.empty else df, use_container_width=True)
 
 st.markdown("### Create Project")
-st.caption("ClickHouse DB memakai namespace: <clickhouse_namespace>_bronze dan <clickhouse_namespace>_gold.")
+st.caption("ClickHouse DB uses namespaces: <clickhouse_namespace>_bronze and <clickhouse_namespace>_gold.")
 if not HAS_CH_NAMESPACE:
     st.warning(
-        "Kolom `clickhouse_namespace` belum ada. Jalankan migration metadata "
+        "The `clickhouse_namespace` column is missing. Run the metadata migration "
         "(`ALTER TABLE metadata.projects ADD COLUMN IF NOT EXISTS clickhouse_namespace TEXT`)."
     )
 with st.form("create_project"):
@@ -94,7 +94,7 @@ with st.form("create_project"):
     name = st.text_input("Project Name")
     clickhouse_namespace = st.text_input(
         "ClickHouse Namespace (optional)",
-        help="Jika kosong: pakai Project ID (jika diawali huruf), jika tidak pakai Project Name.",
+        help="If empty: use Project ID (when it starts with a letter), otherwise use Project Name.",
     )
     timezone = st.text_input("Timezone", value="UTC")
     retention_days = st.number_input("Retention Days", min_value=0, step=1, value=90)
@@ -107,15 +107,15 @@ with st.form("create_project"):
             st.error("Project name is required.")
         else:
             if not HAS_CH_NAMESPACE:
-                st.error("Schema metadata belum mendukung `clickhouse_namespace`.")
+                st.error("Metadata schema does not support `clickhouse_namespace` yet.")
                 st.stop()
             namespace = (clickhouse_namespace or "").strip().lower()
             if not namespace:
                 namespace = _derive_clickhouse_namespace(project_id, name)
             if not _CH_IDENT_RE.match(namespace):
                 st.error(
-                    "ClickHouse Namespace tidak valid. Gunakan huruf/angka/underscore "
-                    "dan harus diawali huruf."
+                    "Invalid ClickHouse Namespace. Use letters/numbers/underscores, "
+                    "and it must start with a letter."
                 )
                 st.stop()
             try:
@@ -143,7 +143,7 @@ if current:
         clickhouse_namespace = st.text_input(
             "ClickHouse Namespace",
             value=current.get("clickhouse_namespace") or _derive_clickhouse_namespace(current["project_id"], current["name"]),
-            help="Digunakan sebagai prefix database ClickHouse.",
+            help="Used as the ClickHouse database prefix.",
         )
         timezone = st.text_input("Timezone", value=current["timezone"])
         retention_days = st.number_input(
@@ -153,15 +153,15 @@ if current:
         submitted = st.form_submit_button("Update Project")
         if submitted:
             if not HAS_CH_NAMESPACE:
-                st.error("Schema metadata belum mendukung `clickhouse_namespace`.")
+                st.error("Metadata schema does not support `clickhouse_namespace` yet.")
                 st.stop()
             namespace = (clickhouse_namespace or "").strip().lower()
             if not namespace:
                 namespace = _derive_clickhouse_namespace(current["project_id"], name)
             if not _CH_IDENT_RE.match(namespace):
                 st.error(
-                    "ClickHouse Namespace tidak valid. Gunakan huruf/angka/underscore "
-                    "dan harus diawali huruf."
+                    "Invalid ClickHouse Namespace. Use letters/numbers/underscores, "
+                    "and it must start with a letter."
                 )
                 st.stop()
             try:

@@ -175,8 +175,8 @@ with tabs[0]:
     st.caption("Create a new ingestion pipeline when a new OpenSearch source appears.")
     if not HAS_TARGET_ROUTING:
         st.warning(
-            "Kolom target routing belum ada. Jalankan migration control-plane "
-            "(`target_dataset`, `target_table_name`) untuk mengaktifkan routing per tabel."
+            "Target routing columns are missing. Run the control-plane migration "
+            "(`target_dataset`, `target_table_name`) to enable per-table routing."
         )
 
     with st.form("puller_add_source"):
@@ -228,8 +228,8 @@ with tabs[0]:
                         "Target Bronze Schema",
                         options=list(target_option_map.keys()),
                         help=(
-                            "Wajib pilih schema tujuan. Source tidak akan diproses puller "
-                            "tanpa target dataset+tabel yang valid."
+                            "Selecting a target schema is required. The puller will skip this source "
+                            "without a valid target dataset+table."
                         ),
                     )
                     selected_target_row = target_option_map[selected_target]
@@ -238,8 +238,8 @@ with tabs[0]:
                     st.caption(f"Routing target: `{target_dataset}` -> `{target_table_name}`")
                 else:
                     st.warning(
-                        "Belum ada Bronze Schema aktif untuk project ini. "
-                        "Buat dulu di menu Bronze Tables."
+                        "There is no active Bronze Schema for this project yet. "
+                        "Create one first in the Bronze Tables menu."
                     )
 
         with st.expander("Step 3: Filters", expanded=False):
@@ -288,8 +288,8 @@ with tabs[0]:
             st.error("Query filter JSON is invalid.")
         elif not HAS_TARGET_ROUTING:
             st.error(
-                "Target routing columns belum ada. Jalankan migration metadata "
-                "(`target_dataset`, `target_table_name`) terlebih dahulu."
+                "Target routing columns are missing. Run the metadata migration "
+                "(`target_dataset`, `target_table_name`) first."
             )
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
@@ -301,7 +301,7 @@ with tabs[0]:
             label = "Password" if auth_type == "basic" else "Secret"
             st.error(f"{label} is required for the selected auth type.")
         elif not target_dataset_norm or not target_table_norm:
-            st.error("Target Bronze Schema wajib dipilih.")
+            st.error("Target Bronze Schema is required.")
         elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
             st.error("Target Dataset must be alphanumeric + underscore.")
         elif target_table_norm and not _is_safe_identifier(target_table_norm):
@@ -312,7 +312,7 @@ with tabs[0]:
             and ((row.get("table_name") or "").lower() == target_table_norm)
             for row in bronze_tables
         ):
-            st.error("Target schema belum ada di Bronze Tables.")
+            st.error("Target schema is not defined in Bronze Tables.")
         else:
             secret_ref_value = None
             secret_enc_value = None
