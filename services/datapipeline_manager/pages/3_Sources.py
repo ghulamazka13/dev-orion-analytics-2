@@ -152,14 +152,9 @@ with tabs[0]:
             time_field = st.text_input(
                 "Time Field", value=current["time_field"] if current else "@timestamp"
             )
-            target_dataset = ""
+            target_dataset = ((current.get("target_dataset") if current else "default") or "default")
             target_table_name = ""
             if HAS_TARGET_ROUTING:
-                target_dataset = st.text_input(
-                    "Target Dataset",
-                    value=(current.get("target_dataset") if current else "") or "",
-                    help="Logical dataset label for routing and metadata.",
-                )
                 target_table_name = st.text_input(
                     "Target Table Name",
                     value=(current.get("target_table_name") if current else "") or "",
@@ -213,7 +208,7 @@ with tabs[0]:
 
     if submit:
         query_filter = ui.parse_json(query_filter_json)
-        target_dataset_norm = (target_dataset or "").strip().lower() if HAS_TARGET_ROUTING else ""
+        target_dataset_norm = (target_dataset or "default").strip().lower() if HAS_TARGET_ROUTING else ""
         target_table_norm = (target_table_name or "").strip().lower() if HAS_TARGET_ROUTING else ""
         if query_filter is None:
             st.error("Query filter JSON is invalid.")
@@ -231,10 +226,8 @@ with tabs[0]:
             st.error(f"{label} is required for the selected auth type.")
         elif project_id == "no-projects":
             st.error("No enabled projects available.")
-        elif not target_dataset_norm or not target_table_norm:
-            st.error("Target Dataset and Target Table Name are required.")
-        elif target_dataset_norm and not _is_safe_identifier(target_dataset_norm):
-            st.error("Target Dataset must be alphanumeric + underscore.")
+        elif not target_table_norm:
+            st.error("Target Table Name is required.")
         elif target_table_norm and not _is_safe_identifier(target_table_norm):
             st.error("Target Table must be alphanumeric + underscore.")
         else:

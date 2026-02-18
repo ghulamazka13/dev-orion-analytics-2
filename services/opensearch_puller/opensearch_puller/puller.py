@@ -82,8 +82,7 @@ class PgStore:
                            s.target_dataset,
                            s.target_table_name,
                            (
-                             NULLIF(btrim(s.target_dataset), '') IS NOT NULL
-                             AND NULLIF(btrim(s.target_table_name), '') IS NOT NULL
+                             NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                            ) AS target_ready,
                            s.query_filter_json,
                            s.enabled,
@@ -120,8 +119,7 @@ class PgStore:
                                s.target_dataset,
                                s.target_table_name,
                                (
-                                 NULLIF(btrim(s.target_dataset), '') IS NOT NULL
-                                 AND NULLIF(btrim(s.target_table_name), '') IS NOT NULL
+                                 NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                                ) AS target_ready,
                                s.query_filter_json,
                                s.enabled,
@@ -1062,7 +1060,7 @@ def run_once() -> None:
         skipped_sources: List[Dict[str, Any]] = []
         namespace_owner: Dict[str, Any] = {}
         for source in sources:
-            target_dataset = str(source.get("target_dataset") or "").strip().lower()
+            target_dataset = str(source.get("target_dataset") or "default").strip().lower()
             target_table_name = str(source.get("target_table_name") or "").strip().lower()
             db_prefix = _resolve_clickhouse_namespace(
                 source.get("clickhouse_namespace"),
@@ -1090,8 +1088,8 @@ def run_once() -> None:
                 )
                 continue
             namespace_owner[db_prefix] = source.get("project_id")
-            if not target_dataset or not target_table_name:
-                reason = "target dataset/table is not set"
+            if not target_table_name:
+                reason = "target table is not set"
                 logging.warning(
                     "Skipping source %s (%s): %s",
                     source.get("source_id"),
@@ -1107,10 +1105,9 @@ def run_once() -> None:
                 )
                 continue
             try:
-                require_identifier(target_dataset)
                 require_identifier(target_table_name)
             except ValueError as exc:
-                reason = f"invalid target dataset/table identifier: {exc}"
+                reason = f"invalid target table identifier: {exc}"
                 logging.warning(
                     "Skipping source %s (%s): %s",
                     source.get("source_id"),
