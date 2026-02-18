@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -9,6 +11,34 @@ ui.inject_css()
 ui.require_auth()
 ui.sidebar()
 ui.header("Monitoring & Status", "Ingestion health and operational metrics")
+
+
+_NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _normalize_token(value: str) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = _NON_IDENT_RE.sub("_", token)
+    token = _MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _derive_clickhouse_namespace(project_id: str, name: str, explicit: str) -> str:
+    namespace = _normalize_token(explicit)
+    if not namespace:
+        project_token = _normalize_token(project_id)
+        name_token = _normalize_token(name)
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    return namespace
 
 
 def _worker_status():
@@ -115,8 +145,23 @@ df = pd.DataFrame(filtered)
 st.dataframe(df, use_container_width=True)
 
 st.markdown("### Operational Metrics")
-projects = db.fetch_all("SELECT project_id FROM metadata.projects ORDER BY project_id")
+try:
+    projects = db.fetch_all(
+        "SELECT project_id, name, clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
+except Exception:
+    projects = db.fetch_all(
+        "SELECT project_id, name, NULL::text AS clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
 project_ids = [row["project_id"] for row in projects]
+project_db = {
+    row["project_id"]: _derive_clickhouse_namespace(
+        row["project_id"],
+        row.get("name") or "",
+        row.get("clickhouse_namespace") or "",
+    )
+    for row in projects
+}
 selected_project = st.selectbox(
     "Project for metrics", options=project_ids or ["no-projects"], key="metrics_project"
 )
@@ -125,10 +170,11 @@ col1, col2 = st.columns(2)
 with col1:
     if selected_project and selected_project != "no-projects":
         try:
+            selected_project_db = project_db.get(selected_project, selected_project)
             rows = clickhouse.query_rows(
                 f"""
                 SELECT count() AS events_last_hour
-                FROM {selected_project}_bronze.os_events_raw
+                FROM {selected_project_db}_bronze.os_events_raw
                 WHERE event_ts >= now() - INTERVAL 1 HOUR
                 """
             )

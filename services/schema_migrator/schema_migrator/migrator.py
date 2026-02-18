@@ -11,14 +11,27 @@ from .utils import quote_identifier, require_identifier
 
 def _fetch_projects(conn) -> List[Dict]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT project_id, timezone, enabled
-            FROM metadata.projects
-            WHERE enabled = TRUE
-            ORDER BY project_id
-            """
-        )
+        try:
+            cur.execute(
+                """
+                SELECT project_id, name, clickhouse_namespace, timezone, enabled
+                FROM metadata.projects
+                WHERE enabled = TRUE
+                ORDER BY project_id
+                """
+            )
+        except psycopg2.Error as exc:
+            if getattr(exc, "pgcode", None) != "42703":
+                raise
+            conn.rollback()
+            cur.execute(
+                """
+                SELECT project_id, name, NULL::text AS clickhouse_namespace, timezone, enabled
+                FROM metadata.projects
+                WHERE enabled = TRUE
+                ORDER BY project_id
+                """
+            )
         return list(cur.fetchall())
 
 
@@ -121,6 +134,51 @@ def _fetch_bronze_event_fields(conn) -> List[Dict]:
 
 
 _SIMPLE_PATH_RE = re.compile(r"^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+|\\[[0-9]+\\])*$")
+_NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _normalize_identifier_token(value: Optional[str]) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = _NON_IDENT_RE.sub("_", token)
+    token = _MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _resolve_clickhouse_namespace(project: Dict) -> str:
+    explicit = _normalize_identifier_token(project.get("clickhouse_namespace"))
+    if explicit:
+        namespace = explicit
+    else:
+        project_token = _normalize_identifier_token(project.get("project_id"))
+        name_token = _normalize_identifier_token(project.get("name"))
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    require_identifier(namespace)
+    return namespace
+
+
+def _build_project_db_map(projects: List[Dict]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    reverse: Dict[str, str] = {}
+    for project in projects:
+        project_id = project["project_id"]
+        namespace = _resolve_clickhouse_namespace(project)
+        other = reverse.get(namespace)
+        if other and other != project_id:
+            raise ValueError(
+                f"ClickHouse namespace collision: project {project_id!r} conflicts with {other!r} ({namespace!r})"
+            )
+        reverse[namespace] = project_id
+        mapping[project_id] = namespace
+    return mapping
 
 
 def _split_paths(value: Optional[str]) -> List[str]:
@@ -287,6 +345,7 @@ def _apply_bronze_event_tables(
     table_rows: List[Dict],
     field_rows: List[Dict],
     project_ids: List[str],
+    project_db_map: Optional[Dict[str, str]] = None,
     collect_results: bool = False,
 ) -> List[Dict]:
     results: List[Dict] = []
@@ -314,7 +373,8 @@ def _apply_bronze_event_tables(
 
         target_projects = _resolve_target_projects(table, project_ids)
         for project_id in target_projects:
-            bronze_db = f"{project_id}_bronze"
+            db_prefix = (project_db_map or {}).get(project_id, project_id)
+            bronze_db = f"{db_prefix}_bronze"
             try:
                 require_identifier(table_name)
                 qualified_table = f"{quote_identifier(bronze_db)}.{quote_identifier(table_name)}"
@@ -427,10 +487,10 @@ def _ensure_default_bronze_columns(ch: ClickHouseClient) -> None:
         )
 
 
-def _ensure_project_storage(ch: ClickHouseClient, project_id: str) -> None:
-    require_identifier(project_id)
-    bronze_db = f"{project_id}_bronze"
-    gold_db = f"{project_id}_gold"
+def _ensure_project_storage(ch: ClickHouseClient, db_prefix: str) -> None:
+    require_identifier(db_prefix)
+    bronze_db = f"{db_prefix}_bronze"
+    gold_db = f"{db_prefix}_gold"
 
     ch.execute(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(bronze_db)}")
     ch.execute(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(gold_db)}")
@@ -479,6 +539,7 @@ def _apply_field_registry(
     ch: ClickHouseClient,
     rows: List[Dict],
     project_ids: List[str],
+    project_db_map: Optional[Dict[str, str]] = None,
     collect_results: bool = False,
 ) -> List[Dict]:
     results: List[Dict] = []
@@ -504,7 +565,8 @@ def _apply_field_registry(
             continue
 
         for project_id in _resolve_target_projects(row, project_ids):
-            target_db = f"{project_id}{db_suffix}"
+            db_prefix = (project_db_map or {}).get(project_id, project_id)
+            target_db = f"{db_prefix}{db_suffix}"
             try:
                 require_identifier(project_id)
                 if "." in row["table_name"]:
@@ -588,6 +650,7 @@ def apply_schema(collect_results: bool = False):
             bronze_fields = []
 
     project_ids = [row["project_id"] for row in projects]
+    project_db_map = _build_project_db_map(projects)
     logging.info("Found %d enabled projects", len(project_ids))
 
     logging.info("Connecting to ClickHouse")
@@ -597,8 +660,9 @@ def apply_schema(collect_results: bool = False):
     _ensure_default_bronze_columns(ch)
 
     for project_id in project_ids:
-        logging.info("Ensuring project storage for %s", project_id)
-        _ensure_project_storage(ch, project_id)
+        db_prefix = project_db_map.get(project_id, project_id)
+        logging.info("Ensuring project storage for %s (db_prefix=%s)", project_id, db_prefix)
+        _ensure_project_storage(ch, db_prefix)
 
     logging.info("Applying bronze event tables (%d entries)", len(bronze_tables))
     bronze_results = _apply_bronze_event_tables(
@@ -606,11 +670,18 @@ def apply_schema(collect_results: bool = False):
         bronze_tables,
         bronze_fields,
         project_ids,
+        project_db_map=project_db_map,
         collect_results=collect_results,
     )
 
     logging.info("Applying field registry (%d entries)", len(field_rows))
-    field_results = _apply_field_registry(ch, field_rows, project_ids, collect_results=collect_results)
+    field_results = _apply_field_registry(
+        ch,
+        field_rows,
+        project_ids,
+        project_db_map=project_db_map,
+        collect_results=collect_results,
+    )
 
     logging.info("Schema migration complete")
     if not collect_results:

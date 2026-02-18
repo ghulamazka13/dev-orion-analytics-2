@@ -18,8 +18,34 @@ POSTGRES_DSN = os.getenv(
 )
 
 IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+MULTI_UNDERSCORE_RE = re.compile(r"_+")
 
 app = FastAPI()
+
+
+def _normalize_token(value: Optional[str]) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = NON_IDENT_RE.sub("_", token)
+    token = MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _derive_clickhouse_namespace(project_id: str, name: str, explicit: Optional[str]) -> str:
+    namespace = _normalize_token(explicit)
+    if not namespace:
+        project_token = _normalize_token(project_id)
+        name_token = _normalize_token(name)
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    return namespace
 
 
 def _connect():
@@ -91,7 +117,7 @@ def health() -> Dict[str, str]:
 def index() -> HTMLResponse:
     projects = _fetch_all(
         """
-        SELECT project_id, name, timezone, retention_days, enabled, created_at, updated_at
+        SELECT project_id, name, clickhouse_namespace, timezone, retention_days, enabled, created_at, updated_at
         FROM metadata.projects
         ORDER BY project_id
         """
@@ -122,17 +148,21 @@ def index() -> HTMLResponse:
 
     content = """
     <h2>Projects</h2>
-    <p class="note">project_id must be alphanumeric + underscore (used for ClickHouse database names).</p>
+    <p class="note">project_id must be alphanumeric + underscore. ClickHouse uses clickhouse_namespace.</p>
     <form method="post" action="/projects">
       <label>project_id</label><input type="text" name="project_id" required />
       <label>name</label><input type="text" name="name" required /><br/><br/>
-      <label>timezone</label><input type="text" name="timezone" value="UTC" />
-      <label>retention_days</label><input type="text" name="retention_days" /><br/><br/>
+      <label>clickhouse_namespace</label><input type="text" name="clickhouse_namespace" />
+      <label>timezone</label><input type="text" name="timezone" value="UTC" /><br/><br/>
+      <label>retention_days</label><input type="text" name="retention_days" />
       <label>enabled</label><input type="checkbox" name="enabled" checked />
       <button class="btn" type="submit">Upsert Project</button>
     </form>
     """
-    content += _render_table(projects, ["project_id", "name", "timezone", "retention_days", "enabled", "updated_at"])
+    content += _render_table(
+        projects,
+        ["project_id", "name", "clickhouse_namespace", "timezone", "retention_days", "enabled", "updated_at"],
+    )
 
     content += """
     <h2>OpenSearch Sources</h2>
@@ -202,6 +232,7 @@ def index() -> HTMLResponse:
 def upsert_project(
     project_id: str = Form(...),
     name: str = Form(...),
+    clickhouse_namespace: Optional[str] = Form(None),
     timezone: str = Form("UTC"),
     retention_days: Optional[str] = Form(None),
     enabled: Optional[str] = Form(None),
@@ -211,20 +242,22 @@ def upsert_project(
 
     retention_value = int(retention_days) if retention_days else None
     is_enabled = enabled is not None
+    namespace = _derive_clickhouse_namespace(project_id, name, clickhouse_namespace)
 
     _execute(
         """
         INSERT INTO metadata.projects (
-          project_id, name, timezone, retention_days, enabled, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, now(), now())
+          project_id, name, clickhouse_namespace, timezone, retention_days, enabled, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, now(), now())
         ON CONFLICT (project_id) DO UPDATE SET
           name = EXCLUDED.name,
+          clickhouse_namespace = EXCLUDED.clickhouse_namespace,
           timezone = EXCLUDED.timezone,
           retention_days = EXCLUDED.retention_days,
           enabled = EXCLUDED.enabled,
           updated_at = now()
         """,
-        (project_id, name, timezone, retention_value, is_enabled),
+        (project_id, name, namespace, timezone, retention_value, is_enabled),
     )
     return RedirectResponse("/", status_code=303)
 
@@ -411,7 +444,8 @@ def apply_schema_action() -> RedirectResponse:
 @app.get("/api/projects")
 def list_projects() -> List[Dict[str, Any]]:
     return _fetch_all(
-        "SELECT project_id, name, timezone, retention_days, enabled FROM metadata.projects ORDER BY project_id"
+        "SELECT project_id, name, clickhouse_namespace, timezone, retention_days, enabled "
+        "FROM metadata.projects ORDER BY project_id"
     )
 
 

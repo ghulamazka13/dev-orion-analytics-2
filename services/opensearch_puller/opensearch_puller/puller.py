@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,37 @@ from .utils import (
 )
 
 
+_NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _normalize_identifier_token(value: Optional[str]) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = _NON_IDENT_RE.sub("_", token)
+    token = _MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _resolve_clickhouse_namespace(
+    explicit: Optional[str], project_name: Optional[str], project_id: Optional[str]
+) -> str:
+    namespace = _normalize_identifier_token(explicit)
+    if not namespace:
+        project_token = _normalize_identifier_token(project_id)
+        name_token = _normalize_identifier_token(project_name)
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    require_identifier(namespace)
+    return namespace
+
+
 class PgStore:
     def __init__(self, dsn: str) -> None:
         self.conn = psycopg2.connect(dsn)
@@ -37,6 +69,8 @@ class PgStore:
                     """
                     SELECT s.source_id,
                            s.project_id,
+                           p.name AS project_name,
+                           p.clickhouse_namespace,
                            s.name,
                            s.base_url,
                            s.auth_type,
@@ -71,36 +105,79 @@ class PgStore:
                 self.conn.rollback()
                 if getattr(exc, "pgcode", None) not in {"42703", "42P01"}:
                     raise
-                logging.warning(
-                    "Target routing metadata is incomplete; all sources will be skipped. "
-                    "Apply control-plane migration for opensearch_sources target columns and bronze_event_tables."
-                )
-                cur.execute(
-                    """
-                    SELECT s.source_id,
-                           s.project_id,
-                           s.name,
-                           s.base_url,
-                           s.auth_type,
-                           s.username,
-                           s.secret_ref,
-                           s.secret_enc,
-                           s.index_pattern,
-                           s.time_field,
-                           NULL::text AS target_dataset,
-                           NULL::text AS target_table_name,
-                           FALSE AS target_ready,
-                           s.query_filter_json,
-                           s.enabled,
-                           p.timezone
-                    FROM metadata.opensearch_sources s
-                    JOIN metadata.projects p
-                      ON p.project_id = s.project_id
-                    WHERE s.enabled = TRUE
-                      AND p.enabled = TRUE
-                    ORDER BY s.source_id
-                    """
-                )
+                try:
+                    # Fallback when projects.clickhouse_namespace is not available yet.
+                    cur.execute(
+                        """
+                        SELECT s.source_id,
+                               s.project_id,
+                               p.name AS project_name,
+                               NULL::text AS clickhouse_namespace,
+                               s.name,
+                               s.base_url,
+                               s.auth_type,
+                               s.username,
+                               s.secret_ref,
+                               s.secret_enc,
+                               s.index_pattern,
+                               s.time_field,
+                               s.target_dataset,
+                               s.target_table_name,
+                               EXISTS (
+                                 SELECT 1
+                                 FROM metadata.bronze_event_tables t
+                                 WHERE t.enabled = TRUE
+                                   AND t.project_id = s.project_id
+                                   AND lower(t.dataset) = lower(s.target_dataset)
+                                   AND lower(t.table_name) = lower(s.target_table_name)
+                               ) AS target_ready,
+                               s.query_filter_json,
+                               s.enabled,
+                               p.timezone
+                        FROM metadata.opensearch_sources s
+                        JOIN metadata.projects p
+                          ON p.project_id = s.project_id
+                        WHERE s.enabled = TRUE
+                          AND p.enabled = TRUE
+                        ORDER BY s.source_id
+                        """
+                    )
+                except psycopg2.Error as fallback_exc:
+                    self.conn.rollback()
+                    if getattr(fallback_exc, "pgcode", None) not in {"42703", "42P01"}:
+                        raise
+                    logging.warning(
+                        "Target routing metadata is incomplete; all sources will be skipped. "
+                        "Apply control-plane migration for opensearch_sources target columns and bronze_event_tables."
+                    )
+                    cur.execute(
+                        """
+                        SELECT s.source_id,
+                               s.project_id,
+                               p.name AS project_name,
+                               NULL::text AS clickhouse_namespace,
+                               s.name,
+                               s.base_url,
+                               s.auth_type,
+                               s.username,
+                               s.secret_ref,
+                               s.secret_enc,
+                               s.index_pattern,
+                               s.time_field,
+                               NULL::text AS target_dataset,
+                               NULL::text AS target_table_name,
+                               FALSE AS target_ready,
+                               s.query_filter_json,
+                               s.enabled,
+                               p.timezone
+                        FROM metadata.opensearch_sources s
+                        JOIN metadata.projects p
+                          ON p.project_id = s.project_id
+                        WHERE s.enabled = TRUE
+                          AND p.enabled = TRUE
+                        ORDER BY s.source_id
+                        """
+                    )
             return list(cur.fetchall())
 
     def fetch_puller_config(self) -> Optional[Dict]:
@@ -360,10 +437,10 @@ class ClickHouseWriter:
                 "ADD COLUMN IF NOT EXISTS extras Map(String, String) DEFAULT map()"
             )
 
-    def ensure_project_storage(self, project_id: str) -> None:
-        require_identifier(project_id)
-        bronze_db = f"{project_id}_bronze"
-        gold_db = f"{project_id}_gold"
+    def ensure_project_storage(self, db_prefix: str) -> None:
+        require_identifier(db_prefix)
+        bronze_db = f"{db_prefix}_bronze"
+        gold_db = f"{db_prefix}_gold"
         self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(bronze_db)}")
         self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(gold_db)}")
 
@@ -785,7 +862,7 @@ def _process_index(
 
             last_ts, last_sort, last_id, written = _process_hits(
                 writer,
-                f"{source['project_id']}_bronze",
+                f"{source['db_prefix']}_bronze",
                 hits,
                 time_field,
                 source["source_id"],
@@ -918,11 +995,11 @@ def _process_incremental(
             store.set_ingestion_status(source["source_id"], index_name, "error", str(exc))
 
 
-def _ensure_project_storage(writer: ClickHouseWriter, project_id: str) -> None:
+def _ensure_project_storage(writer: ClickHouseWriter, db_prefix: str) -> None:
     try:
-        writer.ensure_project_storage(project_id)
+        writer.ensure_project_storage(db_prefix)
     except Exception as exc:
-        logging.error("Failed to ensure storage for %s: %s", project_id, exc)
+        logging.error("Failed to ensure storage for db_prefix=%s: %s", db_prefix, exc)
         raise
 
 
@@ -966,10 +1043,37 @@ def run_once() -> None:
 
         eligible_sources: List[Dict[str, Any]] = []
         skipped_sources: List[Dict[str, Any]] = []
+        namespace_owner: Dict[str, Any] = {}
         for source in sources:
             target_dataset = str(source.get("target_dataset") or "").strip()
             target_table_name = str(source.get("target_table_name") or "").strip()
             target_ready = bool(source.get("target_ready"))
+            db_prefix = _resolve_clickhouse_namespace(
+                source.get("clickhouse_namespace"),
+                source.get("project_name"),
+                source.get("project_id"),
+            )
+            existing_owner = namespace_owner.get(db_prefix)
+            if existing_owner and existing_owner != source.get("project_id"):
+                reason = (
+                    f"clickhouse namespace collision with project {existing_owner!r} "
+                    f"(db_prefix={db_prefix})"
+                )
+                logging.warning(
+                    "Skipping source %s (%s): %s",
+                    source.get("source_id"),
+                    source.get("name"),
+                    reason,
+                )
+                skipped_sources.append(
+                    {
+                        "source_id": source.get("source_id"),
+                        "name": source.get("name"),
+                        "reason": reason,
+                    }
+                )
+                continue
+            namespace_owner[db_prefix] = source.get("project_id")
             if not target_dataset or not target_table_name:
                 reason = "target dataset/table is not set"
                 logging.warning(
@@ -1002,13 +1106,14 @@ def run_once() -> None:
                     }
                 )
                 continue
+            source["db_prefix"] = db_prefix
             eligible_sources.append(source)
 
         if not eligible_sources:
             logging.warning("No eligible OpenSearch sources with valid target mapping")
 
         for source in eligible_sources:
-            _ensure_project_storage(writer, source["project_id"])
+            _ensure_project_storage(writer, source["db_prefix"])
             os_client = _build_os_client(source)
             job = store.fetch_backfill_job(source["source_id"])
             if job:

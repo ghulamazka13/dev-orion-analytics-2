@@ -43,6 +43,34 @@ def _is_safe_identifier(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_]+$", value or ""))
 
 
+_NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _normalize_token(value: str) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = _NON_IDENT_RE.sub("_", token)
+    token = _MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _derive_clickhouse_namespace(project_id: str, name: str, explicit: str) -> str:
+    namespace = _normalize_token(explicit)
+    if not namespace:
+        project_token = _normalize_token(project_id)
+        name_token = _normalize_token(name)
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    return namespace
+
+
 def _fetch_puller_config():
     try:
         return db.fetch_one(
@@ -86,8 +114,23 @@ def _has_target_routing_columns() -> bool:
 HAS_TARGET_ROUTING = _has_target_routing_columns()
 
 
-projects = db.fetch_all("SELECT project_id FROM metadata.projects ORDER BY project_id")
+try:
+    projects = db.fetch_all(
+        "SELECT project_id, name, clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
+except Exception:
+    projects = db.fetch_all(
+        "SELECT project_id, name, NULL::text AS clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
 project_ids = [row["project_id"] for row in projects]
+project_db = {
+    row["project_id"]: _derive_clickhouse_namespace(
+        row["project_id"],
+        row.get("name") or "",
+        row.get("clickhouse_namespace") or "",
+    )
+    for row in projects
+}
 
 try:
     bronze_tables = db.fetch_all(
@@ -629,14 +672,15 @@ with tabs[2]:
         key="puller_metrics_project",
     )
     if selected_project and selected_project != "no-projects":
-        if not _is_safe_identifier(selected_project):
-            st.error("Project id contains unsupported characters.")
+        selected_project_db = project_db.get(selected_project, selected_project)
+        if not _is_safe_identifier(selected_project_db):
+            st.error("Project namespace contains unsupported characters.")
         else:
             try:
                 rows = clickhouse.query_rows(
                     f"""
                     SELECT count() AS events_last_hour
-                    FROM {selected_project}_bronze.os_events_raw
+                    FROM {selected_project_db}_bronze.os_events_raw
                     WHERE event_ts >= now() - INTERVAL 1 HOUR
                     """
                 )
@@ -646,7 +690,7 @@ with tabs[2]:
                 rows = clickhouse.query_rows(
                     f"""
                     SELECT max(event_ts) AS last_event_ts
-                    FROM {selected_project}_bronze.os_events_raw
+                    FROM {selected_project_db}_bronze.os_events_raw
                     """
                 )
                 last_event_ts = rows[0]["last_event_ts"] if rows else None
@@ -657,7 +701,7 @@ with tabs[2]:
                     SELECT source_id,
                            count() AS events_last_hour,
                            max(event_ts) AS last_event_ts
-                    FROM {selected_project}_bronze.os_events_raw
+                    FROM {selected_project_db}_bronze.os_events_raw
                     WHERE event_ts >= now() - INTERVAL 1 HOUR
                     GROUP BY source_id
                     ORDER BY events_last_hour DESC

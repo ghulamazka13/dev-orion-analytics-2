@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -9,6 +11,34 @@ ui.inject_css()
 ui.require_auth()
 ui.sidebar()
 ui.header("ITSEC Datapipeline Manager", "Dashboard overview")
+
+
+_NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _normalize_token(value: str) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    token = _NON_IDENT_RE.sub("_", token)
+    token = _MULTI_UNDERSCORE_RE.sub("_", token)
+    token = token.strip("_")
+    return token.lower()
+
+
+def _derive_clickhouse_namespace(project_id: str, name: str, explicit: str) -> str:
+    namespace = _normalize_token(explicit)
+    if not namespace:
+        project_token = _normalize_token(project_id)
+        name_token = _normalize_token(name)
+        if project_token and project_token[0].isalpha():
+            namespace = project_token
+        else:
+            namespace = name_token or project_token or "project"
+    if not namespace[0].isalpha():
+        namespace = f"p_{namespace}"
+    return namespace
 
 
 def metric_card(label: str, value: str, caption: str = "", accent: str = "#38bdf8") -> None:
@@ -90,13 +120,29 @@ else:
     st.info("No ingestion state yet.")
 
 st.markdown("### Ingestion Trends (Last 24 Hours)")
-projects = db.fetch_all("SELECT project_id FROM metadata.projects ORDER BY project_id")
+try:
+    projects = db.fetch_all(
+        "SELECT project_id, name, clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
+except Exception:
+    projects = db.fetch_all(
+        "SELECT project_id, name, NULL::text AS clickhouse_namespace FROM metadata.projects ORDER BY project_id"
+    )
 project_ids = [row["project_id"] for row in projects]
+project_db = {
+    row["project_id"]: _derive_clickhouse_namespace(
+        row["project_id"],
+        row.get("name") or "",
+        row.get("clickhouse_namespace") or "",
+    )
+    for row in projects
+}
 selected_project = st.selectbox(
     "Project for ClickHouse metrics", options=project_ids or ["no-projects"]
 )
 
 if selected_project and selected_project != "no-projects":
+    selected_project_db = project_db.get(selected_project, selected_project)
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Events per Hour**")
@@ -104,7 +150,7 @@ if selected_project and selected_project != "no-projects":
             rows = clickhouse.query_rows(
                 f"""
                 SELECT toStartOfHour(event_ts) AS hour, count() AS events
-                FROM {selected_project}_bronze.os_events_raw
+                FROM {selected_project_db}_bronze.os_events_raw
                 WHERE event_ts >= now() - INTERVAL 24 HOUR
                 GROUP BY hour
                 ORDER BY hour
@@ -126,7 +172,7 @@ if selected_project and selected_project != "no-projects":
                 f"""
                 SELECT toStartOfHour(ingested_at) AS hour,
                        avg(dateDiff('minute', event_ts, ingested_at)) AS lag_minutes
-                FROM {selected_project}_bronze.os_events_raw
+                FROM {selected_project_db}_bronze.os_events_raw
                 WHERE ingested_at >= now() - INTERVAL 24 HOUR
                 GROUP BY hour
                 ORDER BY hour

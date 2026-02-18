@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS metadata.ui_users (
 CREATE TABLE IF NOT EXISTS metadata.projects (
   project_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  clickhouse_namespace TEXT,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -170,6 +171,9 @@ ALTER TABLE IF EXISTS metadata.opensearch_sources
   ADD COLUMN IF NOT EXISTS target_dataset TEXT,
   ADD COLUMN IF NOT EXISTS target_table_name TEXT;
 
+ALTER TABLE IF EXISTS metadata.projects
+  ADD COLUMN IF NOT EXISTS clickhouse_namespace TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_ui_users_role
   ON metadata.ui_users (role);
 
@@ -178,6 +182,10 @@ CREATE INDEX IF NOT EXISTS idx_ui_users_enabled
 
 CREATE INDEX IF NOT EXISTS idx_projects_enabled
   ON metadata.projects (enabled);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_clickhouse_namespace
+  ON metadata.projects (clickhouse_namespace)
+  WHERE clickhouse_namespace IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_opensearch_sources_project
   ON metadata.opensearch_sources (project_id);
