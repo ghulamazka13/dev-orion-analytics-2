@@ -45,27 +45,32 @@ def _is_safe_identifier(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_]+$", value or ""))
 
 
-def _fetch_target_tables(project_id: str) -> list[str]:
+def _fetch_target_routes(project_id: str, fallback_database: str) -> list[tuple[str, str]]:
     try:
         rows = db.fetch_all(
             """
-            SELECT DISTINCT lower(target_table_name) AS target_table_name
+            SELECT lower(target_dataset) AS target_dataset,
+                   lower(target_table_name) AS target_table_name
             FROM metadata.opensearch_sources
             WHERE project_id = %s
               AND enabled = TRUE
               AND NULLIF(btrim(target_table_name), '') IS NOT NULL
-            ORDER BY 1
+            ORDER BY 1, 2
             """,
             (project_id,),
         )
     except Exception:
         rows = []
-    tables = [
-        str(row.get("target_table_name") or "").strip()
-        for row in rows
-        if _is_safe_identifier(str(row.get("target_table_name") or "").strip())
-    ]
-    return sorted(set(tables))
+    routes = set()
+    for row in rows:
+        table_name = str(row.get("target_table_name") or "").strip()
+        if not _is_safe_identifier(table_name):
+            continue
+        dataset_name = str(row.get("target_dataset") or "").strip()
+        database_name = dataset_name if _is_safe_identifier(dataset_name) else fallback_database
+        if _is_safe_identifier(database_name):
+            routes.add((database_name, table_name))
+    return sorted(routes)
 
 
 def _worker_status():
@@ -198,10 +203,11 @@ with col1:
     if selected_project and selected_project != "no-projects":
         try:
             selected_project_db = project_db.get(selected_project, selected_project)
-            target_tables = _fetch_target_tables(selected_project)
+            fallback_database = f"{selected_project_db}_bronze"
+            target_routes = _fetch_target_routes(selected_project, fallback_database)
             total_events = 0
-            for table_name in target_tables:
-                qualified_table = f"`{selected_project_db}_bronze`.`{table_name}`"
+            for database_name, table_name in target_routes:
+                qualified_table = f"`{database_name}`.`{table_name}`"
                 rows = clickhouse.query_rows(
                     f"""
                     SELECT count() AS events_last_hour
@@ -211,10 +217,11 @@ with col1:
                 )
                 total_events += int(rows[0]["events_last_hour"]) if rows else 0
             st.metric("Events (Last Hour)", int(total_events))
-            if target_tables:
-                st.caption(f"Tables scanned: {', '.join(target_tables)}")
+            if target_routes:
+                scanned_tables = [f"{db_name}.{tbl_name}" for db_name, tbl_name in target_routes]
+                st.caption(f"Tables scanned: {', '.join(scanned_tables)}")
             else:
-                st.caption("No target tables configured for this project.")
+                st.caption("No target destination configured for this project.")
         except Exception as exc:
             st.error(f"ClickHouse query failed: {exc}")
 with col2:

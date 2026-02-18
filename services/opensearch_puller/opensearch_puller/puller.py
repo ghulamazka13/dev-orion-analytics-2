@@ -416,6 +416,24 @@ class ClickHouseWriter:
         except ValueError:
             return False
 
+    def database_exists(self, database: str) -> bool:
+        require_identifier(database)
+        query = (
+            "SELECT count() FROM system.databases "
+            f"WHERE name = '{database}' "
+            "FORMAT TabSeparated"
+        )
+        response = self.session.post(
+            f"{self.base_url}/",
+            params={"query": query},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        try:
+            return int(response.text.strip() or "0") > 0
+        except ValueError:
+            return False
+
     def ensure_default_bronze_columns(self) -> None:
         for table in ["suricata_events_raw", "wazuh_events_raw", "zeek_events_raw"]:
             if not self.table_exists("bronze", table):
@@ -426,16 +444,6 @@ class ClickHouseWriter:
                 "ADD COLUMN IF NOT EXISTS raw String, "
                 "ADD COLUMN IF NOT EXISTS extras Map(String, String) DEFAULT map()"
             )
-
-    def ensure_project_storage(self, db_prefix: str) -> None:
-        require_identifier(db_prefix)
-        bronze_db = f"{db_prefix}_bronze"
-        gold_db = f"{db_prefix}_gold"
-        self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(bronze_db)}")
-        self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(gold_db)}")
-
-        table = f"{quote_identifier(bronze_db)}.{quote_identifier('os_events_raw')}"
-        self._ensure_raw_table(table)
 
     def _ensure_raw_table(self, qualified_table: str) -> None:
         self.execute_sql(
@@ -455,11 +463,10 @@ class ClickHouseWriter:
             """
         )
 
-    def ensure_target_raw_table(self, db_prefix: str, table_name: str) -> None:
-        require_identifier(db_prefix)
+    def ensure_target_raw_table(self, database_name: str, table_name: str) -> None:
+        require_identifier(database_name)
         require_identifier(table_name)
-        bronze_db = f"{db_prefix}_bronze"
-        qualified_table = f"{quote_identifier(bronze_db)}.{quote_identifier(table_name)}"
+        qualified_table = f"{quote_identifier(database_name)}.{quote_identifier(table_name)}"
         self._ensure_raw_table(qualified_table)
 
     def insert_rows(self, database: str, table: str, rows: List[Dict[str, Any]]) -> None:
@@ -863,7 +870,7 @@ def _process_index(
 
             last_ts, last_sort, last_id, written = _process_hits(
                 writer,
-                f"{source['db_prefix']}_bronze",
+                source["target_dataset"],
                 source["target_table_name"],
                 hits,
                 time_field,
@@ -997,21 +1004,13 @@ def _process_incremental(
             store.set_ingestion_status(source["source_id"], index_name, "error", str(exc))
 
 
-def _ensure_project_storage(writer: ClickHouseWriter, db_prefix: str) -> None:
+def _ensure_target_table_storage(writer: ClickHouseWriter, database_name: str, table_name: str) -> None:
     try:
-        writer.ensure_project_storage(db_prefix)
-    except Exception as exc:
-        logging.error("Failed to ensure storage for db_prefix=%s: %s", db_prefix, exc)
-        raise
-
-
-def _ensure_target_table_storage(writer: ClickHouseWriter, db_prefix: str, table_name: str) -> None:
-    try:
-        writer.ensure_target_raw_table(db_prefix, table_name)
+        writer.ensure_target_raw_table(database_name, table_name)
     except Exception as exc:
         logging.error(
-            "Failed to ensure target table storage for db_prefix=%s table=%s: %s",
-            db_prefix,
+            "Failed to ensure target table storage for database=%s table=%s: %s",
+            database_name,
             table_name,
             exc,
         )
@@ -1058,21 +1057,11 @@ def run_once() -> None:
 
         eligible_sources: List[Dict[str, Any]] = []
         skipped_sources: List[Dict[str, Any]] = []
-        namespace_owner: Dict[str, Any] = {}
         for source in sources:
-            target_dataset = str(source.get("target_dataset") or "default").strip().lower()
+            target_dataset = str(source.get("target_dataset") or "").strip().lower()
             target_table_name = str(source.get("target_table_name") or "").strip().lower()
-            db_prefix = _resolve_clickhouse_namespace(
-                source.get("clickhouse_namespace"),
-                source.get("project_name"),
-                source.get("project_id"),
-            )
-            existing_owner = namespace_owner.get(db_prefix)
-            if existing_owner and existing_owner != source.get("project_id"):
-                reason = (
-                    f"clickhouse namespace collision with project {existing_owner!r} "
-                    f"(db_prefix={db_prefix})"
-                )
+            if not target_dataset:
+                reason = "target dataset is not set"
                 logging.warning(
                     "Skipping source %s (%s): %s",
                     source.get("source_id"),
@@ -1087,9 +1076,26 @@ def run_once() -> None:
                     }
                 )
                 continue
-            namespace_owner[db_prefix] = source.get("project_id")
             if not target_table_name:
                 reason = "target table is not set"
+                logging.warning(
+                    "Skipping source %s (%s): %s",
+                    source.get("source_id"),
+                    source.get("name"),
+                    reason,
+                )
+                skipped_sources.append(
+                    {
+                        "source_id": source.get("source_id"),
+                        "name": source.get("name"),
+                        "reason": reason,
+                    }
+                )
+                continue
+            try:
+                require_identifier(target_dataset)
+            except ValueError as exc:
+                reason = f"invalid target dataset identifier: {exc}"
                 logging.warning(
                     "Skipping source %s (%s): %s",
                     source.get("source_id"),
@@ -1122,7 +1128,39 @@ def run_once() -> None:
                     }
                 )
                 continue
-            source["db_prefix"] = db_prefix
+            try:
+                if not writer.database_exists(target_dataset):
+                    reason = f"target dataset/database does not exist in ClickHouse: {target_dataset}"
+                    logging.warning(
+                        "Skipping source %s (%s): %s",
+                        source.get("source_id"),
+                        source.get("name"),
+                        reason,
+                    )
+                    skipped_sources.append(
+                        {
+                            "source_id": source.get("source_id"),
+                            "name": source.get("name"),
+                            "reason": reason,
+                        }
+                    )
+                    continue
+            except Exception as exc:
+                reason = f"failed to validate target dataset on ClickHouse: {exc}"
+                logging.warning(
+                    "Skipping source %s (%s): %s",
+                    source.get("source_id"),
+                    source.get("name"),
+                    reason,
+                )
+                skipped_sources.append(
+                    {
+                        "source_id": source.get("source_id"),
+                        "name": source.get("name"),
+                        "reason": reason,
+                    }
+                )
+                continue
             source["target_dataset"] = target_dataset
             source["target_table_name"] = target_table_name
             eligible_sources.append(source)
@@ -1131,8 +1169,7 @@ def run_once() -> None:
             logging.warning("No eligible OpenSearch sources with valid target mapping")
 
         for source in eligible_sources:
-            _ensure_project_storage(writer, source["db_prefix"])
-            _ensure_target_table_storage(writer, source["db_prefix"], source["target_table_name"])
+            _ensure_target_table_storage(writer, source["target_dataset"], source["target_table_name"])
             os_client = _build_os_client(source)
             job = store.fetch_backfill_job(source["source_id"])
             if job:

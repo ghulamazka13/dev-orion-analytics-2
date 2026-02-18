@@ -109,6 +109,17 @@ def _has_target_routing_columns() -> bool:
         return False
 
 
+def _clickhouse_database_exists(database_name: str) -> bool:
+    rows = clickhouse.query_rows(
+        f"""
+        SELECT count() AS count
+        FROM system.databases
+        WHERE name = '{database_name}'
+        """
+    )
+    return bool(rows and int(rows[0].get("count", 0)) > 0)
+
+
 HAS_TARGET_ROUTING = _has_target_routing_columns()
 
 
@@ -160,7 +171,8 @@ with tabs[0]:
     st.markdown("### Source Routing")
     st.caption(
         "Source connection and indexing are managed only in the Sources menu. "
-        "Use this page to select an existing source and set its target table."
+        "Use this page to select an existing source and map it to an existing ClickHouse dataset (database) "
+        "plus target table."
     )
     if not HAS_TARGET_ROUTING:
         st.warning(
@@ -213,37 +225,63 @@ with tabs[0]:
             else:
                 st.error(message)
 
-        st.markdown("### Define Target Table")
+        st.markdown("### Define Target Destination")
         if HAS_TARGET_ROUTING:
             with st.form("puller_set_target_table_form"):
+                target_dataset_existing = st.text_input(
+                    "Target Dataset (ClickHouse Database)",
+                    value=(selected_row.get("target_dataset") if selected_row else "") or "",
+                    help="Create this database manually in ClickHouse UI first. Example: myproject_bronze",
+                )
                 target_table_existing = st.text_input(
                     "Target Table Name",
                     value=(selected_row.get("target_table_name") if selected_row else "") or "",
-                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
+                    help="Table will be auto-created in the selected dataset if it does not exist.",
                 )
-                submitted_target = st.form_submit_button("Save Target Table")
+                if target_dataset_existing and target_table_existing:
+                    st.caption(
+                        "Destination preview: "
+                        f"`{target_dataset_existing.strip().lower()}.{target_table_existing.strip().lower()}`"
+                    )
+                submitted_target = st.form_submit_button("Save Destination")
             if submitted_target:
+                target_dataset_norm = (target_dataset_existing or "").strip().lower()
                 target_table_norm = (target_table_existing or "").strip().lower()
-                if not target_table_norm:
+                if not target_dataset_norm:
+                    st.error("Target Dataset is required.")
+                elif not _is_safe_identifier(target_dataset_norm):
+                    st.error("Target Dataset must be alphanumeric + underscore.")
+                elif not target_table_norm:
                     st.error("Target Table Name is required.")
                 elif not _is_safe_identifier(target_table_norm):
                     st.error("Target Table must be alphanumeric + underscore.")
                 else:
                     try:
-                        db.execute(
-                            """
-                            UPDATE metadata.opensearch_sources
-                            SET target_dataset = %s,
-                                target_table_name = %s,
-                                updated_at = now()
-                            WHERE source_id = %s
-                            """,
-                            ("default", target_table_norm, selected_id),
-                        )
-                        ui.notify("Target table updated.")
-                        st.rerun()
+                        dataset_exists = _clickhouse_database_exists(target_dataset_norm)
                     except Exception as exc:
-                        st.error(f"Update failed: {exc}")
+                        st.error(f"Failed to validate dataset in ClickHouse: {exc}")
+                    else:
+                        if not dataset_exists:
+                            st.error(
+                                f"Dataset/database `{target_dataset_norm}` is not found in ClickHouse. "
+                                "Create it first in ClickHouse UI."
+                            )
+                        else:
+                            try:
+                                db.execute(
+                                    """
+                                    UPDATE metadata.opensearch_sources
+                                    SET target_dataset = %s,
+                                        target_table_name = %s,
+                                        updated_at = now()
+                                    WHERE source_id = %s
+                                    """,
+                                    (target_dataset_norm, target_table_norm, selected_id),
+                                )
+                                ui.notify("Target destination updated.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Update failed: {exc}")
         else:
             st.info("Run metadata migration first to enable target table mapping.")
 
@@ -533,25 +571,31 @@ with tabs[2]:
             st.error("Project namespace contains unsupported characters.")
         else:
             try:
-                target_tables = sorted(
-                    {
-                        str(row.get("target_table_name") or "").strip().lower()
-                        for row in sources
-                        if row.get("project_id") == selected_project
-                        and row.get("enabled")
-                        and str(row.get("target_table_name") or "").strip()
-                        and _is_safe_identifier(str(row.get("target_table_name") or "").strip().lower())
-                    }
-                )
-                if not target_tables:
-                    st.info("No target tables configured for this project.")
+                target_routes = set()
+                for row in sources:
+                    if row.get("project_id") != selected_project or not row.get("enabled"):
+                        continue
+                    table_name = str(row.get("target_table_name") or "").strip().lower()
+                    if not table_name or not _is_safe_identifier(table_name):
+                        continue
+                    dataset_name = str(row.get("target_dataset") or "").strip().lower()
+                    if dataset_name and _is_safe_identifier(dataset_name):
+                        database_name = dataset_name
+                    else:
+                        database_name = f"{selected_project_db}_bronze"
+                    if _is_safe_identifier(database_name):
+                        target_routes.add((database_name, table_name))
+
+                if not target_routes:
+                    st.info("No target destination configured for this project.")
                 else:
+                    target_routes = sorted(target_routes)
                     total_events_last_hour = 0
                     latest_event_ts = None
                     per_source: dict = {}
 
-                    for table_name in target_tables:
-                        qualified_table = f"`{selected_project_db}_bronze`.`{table_name}`"
+                    for database_name, table_name in target_routes:
+                        qualified_table = f"`{database_name}`.`{table_name}`"
                         rows = clickhouse.query_rows(
                             f"""
                             SELECT count() AS events_last_hour
@@ -609,6 +653,7 @@ with tabs[2]:
                         ]
                         source_rows.sort(key=lambda item: item["events_last_hour"], reverse=True)
                         st.dataframe(pd.DataFrame(source_rows), use_container_width=True)
-                    st.caption(f"Tables scanned: {', '.join(target_tables)}")
+                    scanned_tables = [f"{db_name}.{tbl_name}" for db_name, tbl_name in target_routes]
+                    st.caption(f"Tables scanned: {', '.join(scanned_tables)}")
             except Exception as exc:
                 st.error(f"ClickHouse query failed: {exc}")

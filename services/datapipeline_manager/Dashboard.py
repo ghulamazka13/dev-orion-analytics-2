@@ -45,27 +45,32 @@ def _is_safe_identifier(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_]+$", value or ""))
 
 
-def _fetch_target_tables(project_id: str) -> list[str]:
+def _fetch_target_routes(project_id: str, fallback_database: str) -> list[tuple[str, str]]:
     try:
         rows = db.fetch_all(
             """
-            SELECT DISTINCT lower(target_table_name) AS target_table_name
+            SELECT lower(target_dataset) AS target_dataset,
+                   lower(target_table_name) AS target_table_name
             FROM metadata.opensearch_sources
             WHERE project_id = %s
               AND enabled = TRUE
               AND NULLIF(btrim(target_table_name), '') IS NOT NULL
-            ORDER BY 1
+            ORDER BY 1, 2
             """,
             (project_id,),
         )
     except Exception:
         rows = []
-    tables = [
-        str(row.get("target_table_name") or "").strip()
-        for row in rows
-        if _is_safe_identifier(str(row.get("target_table_name") or "").strip())
-    ]
-    return sorted(set(tables))
+    routes = set()
+    for row in rows:
+        table_name = str(row.get("target_table_name") or "").strip()
+        if not _is_safe_identifier(table_name):
+            continue
+        dataset_name = str(row.get("target_dataset") or "").strip()
+        database_name = dataset_name if _is_safe_identifier(dataset_name) else fallback_database
+        if _is_safe_identifier(database_name):
+            routes.add((database_name, table_name))
+    return sorted(routes)
 
 
 def metric_card(label: str, value: str, caption: str = "", accent: str = "#38bdf8") -> None:
@@ -170,25 +175,29 @@ selected_project = st.selectbox(
 
 if selected_project and selected_project != "no-projects":
     selected_project_db = project_db.get(selected_project, selected_project)
-    target_tables = _fetch_target_tables(selected_project)
-    if not target_tables:
-        st.info("No target tables configured for this project.")
-        target_tables = []
+    fallback_database = f"{selected_project_db}_bronze"
+    if not _is_safe_identifier(fallback_database):
+        st.error("Project namespace contains unsupported characters.")
+        target_routes: list[tuple[str, str]] = []
+    else:
+        target_routes = _fetch_target_routes(selected_project, fallback_database)
+    if not target_routes:
+        st.info("No target destination configured for this project.")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Events per Hour**")
         try:
-            if not target_tables:
+            if not target_routes:
                 rows = []
             else:
                 union_sql = " UNION ALL ".join(
                     [
                         (
                             f"SELECT event_ts "
-                            f"FROM `{selected_project_db}_bronze`.`{table_name}` "
+                            f"FROM `{database_name}`.`{table_name}` "
                             "WHERE event_ts >= now() - INTERVAL 24 HOUR"
                         )
-                        for table_name in target_tables
+                        for database_name, table_name in target_routes
                     ]
                 )
                 rows = clickhouse.query_rows(
@@ -211,17 +220,17 @@ if selected_project and selected_project != "no-projects":
     with col2:
         st.markdown("**Ingestion Lag (minutes)**")
         try:
-            if not target_tables:
+            if not target_routes:
                 lag_rows = []
             else:
                 union_sql = " UNION ALL ".join(
                     [
                         (
                             f"SELECT event_ts, ingested_at "
-                            f"FROM `{selected_project_db}_bronze`.`{table_name}` "
+                            f"FROM `{database_name}`.`{table_name}` "
                             "WHERE ingested_at >= now() - INTERVAL 24 HOUR"
                         )
-                        for table_name in target_tables
+                        for database_name, table_name in target_routes
                     ]
                 )
                 lag_rows = clickhouse.query_rows(
