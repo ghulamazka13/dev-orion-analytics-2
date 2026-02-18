@@ -1,9 +1,7 @@
-import json
 import re
 from typing import Optional
 
 import pandas as pd
-import psycopg2
 import streamlit as st
 
 from datapipeline_manager import clickhouse, db, opensearch, ui
@@ -13,7 +11,7 @@ ui.set_page_config("Puller")
 ui.inject_css()
 ui.require_auth()
 ui.sidebar()
-ui.header("OpenSearch Puller", "Onboard sources, configure ingestion, and monitor health")
+ui.header("OpenSearch Puller", "Map existing sources to target tables and monitor ingestion")
 
 
 DEFAULT_CONFIG = {
@@ -156,213 +154,67 @@ else:
         row["target_table_name"] = None
 
 
-tabs = st.tabs(["Add Source", "Puller Config", "Monitoring"])
+tabs = st.tabs(["Source Routing", "Puller Config", "Monitoring"])
 
 with tabs[0]:
-    st.markdown("### Add OpenSearch Source")
-    st.caption("Create a new ingestion pipeline when a new OpenSearch source appears.")
+    st.markdown("### Source Routing")
+    st.caption(
+        "Source connection and indexing are managed only in the Sources menu. "
+        "Use this page to select an existing source and set its target table."
+    )
     if not HAS_TARGET_ROUTING:
         st.warning(
-            "Target routing columns are missing. Run the control-plane migration "
-            "(`target_dataset`, `target_table_name`) to enable per-table routing."
+            "Target routing columns are missing. Run metadata migration "
+            "for `target_dataset` and `target_table_name`."
         )
 
-    with st.form("puller_add_source"):
-        project_id = st.selectbox(
-            "Project",
-            options=project_ids or ["no-projects"],
-        )
-        name = st.text_input("Source Name", value="")
+    if not sources:
+        st.info("No sources available. Create a source first in the Sources menu.")
+    else:
+        display_rows = [
+            {key: value for key, value in row.items() if key != "secret_enc"}
+            for row in sources
+        ]
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True)
 
-        auth_options = ["none", "basic", "api_key", "bearer"]
-        with st.expander("Step 1: Connection", expanded=True):
-            base_url = st.text_input("Base URL", value="")
-            auth_type = st.selectbox("Auth Type", options=auth_options, index=0)
-            username = st.text_input("Username", value="")
-            secret_mode = st.radio(
-                "Credential Source",
-                options=["stored", "secret_ref"],
-                index=0,
-                horizontal=True,
-                help="Store credentials in Postgres or reference a mounted secret file.",
-            )
-            secret_ref = None
-            secret = ""
-            if auth_type != "none":
-                if secret_mode == "stored":
-                    label = "Password" if auth_type == "basic" else "Secret"
-                    secret = st.text_input(label, type="password")
-                else:
-                    secret_ref = st.text_input("Secret Ref (file path)", value="/run/secrets/opensearch_key")
-                    st.caption("Secret file must be mounted into /run/secrets.")
-            else:
-                st.caption("No secret needed for auth_type=none.")
-
-        with st.expander("Step 2: Indexing", expanded=True):
-            index_pattern = st.text_input("Index Pattern", value="")
-            time_field = st.text_input("Time Field", value="@timestamp")
-            target_dataset = "default"
-            target_table_name = ""
-            if HAS_TARGET_ROUTING:
-                target_table_name = st.text_input(
-                    "Target Table Name",
-                    value="os_events_raw",
-                    help="Raw OpenSearch events will be inserted into <project_namespace>_bronze.<table_name>.",
-                )
-                if target_table_name:
-                    st.caption(f"Write target: `<project_namespace>_bronze.{target_table_name}`")
-
-        with st.expander("Step 3: Filters", expanded=False):
-            query_filter_json = st.text_area("Query Filter JSON", value="{}", height=80)
-
-        enabled = st.checkbox("Enabled", value=True)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            submit = st.form_submit_button("Create Source")
-        with col_b:
-            test = st.form_submit_button("Test Connection")
-
-    if test:
-        query_filter = ui.parse_json(query_filter_json)
-        if query_filter is None:
-            st.error("Query filter JSON is invalid.")
-        else:
-            secret_value = None
-            if auth_type != "none":
-                if secret_mode == "stored":
-                    secret_value = secret
-                else:
-                    secret_value = _read_secret(secret_ref)
-            if auth_type != "none" and not secret_value:
-                label = "Password" if auth_type == "basic" else "Secret"
-                st.error(f"{label} is required for the selected auth type.")
-            else:
-                ok, message, indices = opensearch.test_connection(
-                    base_url=base_url,
-                    index_pattern=index_pattern,
-                    auth_type=None if auth_type == "none" else auth_type,
-                    username=username,
-                    secret=secret_value,
-                )
-                if ok:
-                    ui.notify(message, "success")
-                    st.write(indices)
-                else:
-                    st.error(message)
-
-    if submit:
-        query_filter = ui.parse_json(query_filter_json)
-        target_dataset_norm = (target_dataset or "default").strip().lower() if HAS_TARGET_ROUTING else ""
-        target_table_norm = (target_table_name or "").strip().lower() if HAS_TARGET_ROUTING else ""
-        if query_filter is None:
-            st.error("Query filter JSON is invalid.")
-        elif not HAS_TARGET_ROUTING:
-            st.error(
-                "Target routing columns are missing. Run the metadata migration "
-                "(`target_dataset`, `target_table_name`) first."
-            )
-        elif project_id == "no-projects":
-            st.error("No enabled projects available.")
-        elif not name or not base_url or not index_pattern or not time_field:
-            st.error("Name, base URL, index pattern, and time field are required.")
-        elif auth_type != "none" and secret_mode == "secret_ref" and not secret_ref:
-            st.error("Secret ref is required for the selected auth type.")
-        elif auth_type != "none" and secret_mode == "stored" and not secret:
-            label = "Password" if auth_type == "basic" else "Secret"
-            st.error(f"{label} is required for the selected auth type.")
-        elif not target_table_norm:
-            st.error("Target Table Name is required.")
-        elif target_table_norm and not _is_safe_identifier(target_table_norm):
-            st.error("Target Table must be alphanumeric + underscore.")
-        else:
-            secret_ref_value = None
-            secret_enc_value = None
-            if auth_type != "none":
-                if secret_mode == "secret_ref":
-                    secret_ref_value = secret_ref
-                else:
-                    secret_enc_value = ui.encrypt_secret(secret)
-            secret_enc_param = (
-                psycopg2.Binary(secret_enc_value) if secret_enc_value is not None else None
-            )
-            try:
-                if HAS_TARGET_ROUTING:
-                    db.execute(
-                        """
-                        INSERT INTO metadata.opensearch_sources (
-                          project_id, name, base_url, auth_type, username, secret_ref,
-                          secret_enc, index_pattern, time_field, target_dataset, target_table_name,
-                          query_filter_json,
-                          enabled, created_at, updated_at
-                        ) VALUES (
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
-                        )
-                        """,
-                        (
-                            project_id,
-                            name,
-                            base_url,
-                            None if auth_type == "none" else auth_type,
-                            username,
-                            secret_ref_value,
-                            secret_enc_param,
-                            index_pattern,
-                            time_field,
-                            target_dataset_norm or None,
-                            target_table_norm or None,
-                            json.dumps(query_filter),
-                            enabled,
-                        ),
-                    )
-                else:
-                    db.execute(
-                        """
-                        INSERT INTO metadata.opensearch_sources (
-                          project_id, name, base_url, auth_type, username, secret_ref,
-                          secret_enc, index_pattern, time_field, query_filter_json,
-                          enabled, created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-                        """,
-                        (
-                            project_id,
-                            name,
-                            base_url,
-                            None if auth_type == "none" else auth_type,
-                            username,
-                            secret_ref_value,
-                            secret_enc_param,
-                            index_pattern,
-                            time_field,
-                            json.dumps(query_filter),
-                            enabled,
-                        ),
-                    )
-                ui.notify("Source created.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Save failed: {exc}")
-
-    st.markdown("### Define Target Table For Existing Source")
-    if HAS_TARGET_ROUTING:
         existing_options = [
             (str(row["source_id"]), f"{row['project_id']} / {row['name']} (id={row['source_id']})")
             for row in sources
         ]
-        if existing_options:
-            option_labels = [label for _, label in existing_options]
-            selected_label = st.selectbox(
-                "Existing Source",
-                options=option_labels,
-                key="puller_existing_source_target",
+        option_labels = [label for _, label in existing_options]
+        selected_label = st.selectbox(
+            "Existing Source",
+            options=option_labels,
+            key="puller_existing_source",
+        )
+        selected_id = next(
+            (source_id for source_id, label in existing_options if label == selected_label),
+            None,
+        )
+        selected_row = next(
+            (row for row in sources if str(row["source_id"]) == str(selected_id)),
+            None,
+        )
+
+        if selected_row and st.button("Test Selected Source Connection", key="puller_test_existing_source"):
+            secret_value = _read_secret(selected_row.get("secret_ref"))
+            if not secret_value:
+                secret_value = ui.decrypt_secret(selected_row.get("secret_enc"))
+            ok, message, indices = opensearch.test_connection(
+                base_url=selected_row["base_url"],
+                index_pattern=selected_row["index_pattern"],
+                auth_type=selected_row.get("auth_type"),
+                username=selected_row.get("username"),
+                secret=secret_value,
             )
-            selected_id = next(
-                (source_id for source_id, label in existing_options if label == selected_label),
-                None,
-            )
-            selected_row = next(
-                (row for row in sources if str(row["source_id"]) == str(selected_id)),
-                None,
-            )
+            if ok:
+                ui.notify(message, "success")
+                st.write(indices)
+            else:
+                st.error(message)
+
+        st.markdown("### Define Target Table")
+        if HAS_TARGET_ROUTING:
             with st.form("puller_set_target_table_form"):
                 target_table_existing = st.text_input(
                     "Target Table Name",
@@ -393,22 +245,7 @@ with tabs[0]:
                     except Exception as exc:
                         st.error(f"Update failed: {exc}")
         else:
-            st.info("No sources available. Create one in Sources or Puller Add Source first.")
-    else:
-        st.info(
-            "Target routing columns are missing. Run metadata migration "
-            "for `target_dataset` and `target_table_name`."
-        )
-
-    st.markdown("### Existing Sources")
-    if sources:
-        display_rows = [
-            {key: value for key, value in row.items() if key != "secret_enc"}
-            for row in sources
-        ]
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True)
-    else:
-        st.info("No OpenSearch sources configured yet.")
+            st.info("Run metadata migration first to enable target table mapping.")
 
 with tabs[1]:
     st.markdown("### Puller Configuration")
