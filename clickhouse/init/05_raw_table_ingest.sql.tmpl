@@ -5,11 +5,11 @@ DROP TABLE IF EXISTS bronze.zeek_events_mv;
 CREATE MATERIALIZED VIEW bronze.suricata_events_mv
 TO bronze.suricata_events_raw
 AS
+AS
 SELECT
-  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
-      event_ts,
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
       parseDateTime64BestEffortOrNull(JSON_VALUE(raw, '$.suricata.timestamp'))
     ),
@@ -80,22 +80,17 @@ SELECT
     JSON_VALUE(raw, '$.rule.name')
   ) AS message,
   raw AS raw_data
-FROM {{RAW_SOURCE_FROM}}
-WHERE (
-  JSONHas(raw, 'suricata')
-  OR JSON_VALUE(raw, '$.event.module') = 'suricata'
-  OR JSON_VALUE(raw, '$.event.provider') = 'suricata'
-)
-  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';
+FROM bronze.security_events_kafka
+WHERE JSONHas(raw, 'suricata')
+  AND JSON_VALUE(raw, '$.event.hash') != '';
 
 CREATE MATERIALIZED VIEW bronze.wazuh_events_mv
 TO bronze.wazuh_events_raw
 AS
 SELECT
-  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
-      event_ts,
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
       parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
       fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.start'))),
@@ -104,10 +99,7 @@ SELECT
     'Asia/Jakarta'
   ) AS event_ts,
   toTimeZone(
-    coalesce(
-      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
-      ingested_at
-    ),
+    parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
     'Asia/Jakarta'
   ) AS event_ingested_ts,
   toTimeZone(
@@ -133,21 +125,17 @@ SELECT
   ifNull(JSONExtract(raw, 'tags', 'Array(String)'), []) AS tags,
   coalesce(JSONExtractString(raw, 'message'), JSON_VALUE(raw, '$.rule.name')) AS message,
   raw AS raw_data
-FROM {{RAW_SOURCE_FROM}}
-WHERE (
-  JSON_VALUE(raw, '$.event.provider') = 'wazuh'
-  OR JSONHas(raw, 'wazuh')
-)
-  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';
+FROM bronze.security_events_kafka
+WHERE JSON_VALUE(raw, '$.event.provider') = 'wazuh'
+  AND JSON_VALUE(raw, '$.event.hash') != '';
 
 CREATE MATERIALIZED VIEW bronze.zeek_events_mv
 TO bronze.zeek_events_raw
 AS
 SELECT
-  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
-      event_ts,
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
       parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.zeek.ts'), '')),
       parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
@@ -156,10 +144,7 @@ SELECT
     'Asia/Jakarta'
   ) AS event_ts,
   toTimeZone(
-    coalesce(
-      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
-      ingested_at
-    ),
+    parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
     'Asia/Jakarta'
   ) AS event_ingested_ts,
   toTimeZone(
@@ -278,10 +263,6 @@ SELECT
     JSON_VALUE(raw, '$.zeek.conn.conn_state_description')
   ) AS message,
   raw AS raw_data
-FROM {{RAW_SOURCE_FROM}}
-WHERE (
-  JSONHas(raw, 'zeek')
-  OR JSON_VALUE(raw, '$.event.module') = 'zeek'
-  OR JSON_VALUE(raw, '$.event.provider') = 'zeek'
-)
-  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';
+FROM bronze.security_events_kafka
+WHERE JSONHas(raw, 'zeek')
+  AND JSON_VALUE(raw, '$.event.hash') != '';
