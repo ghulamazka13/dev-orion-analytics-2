@@ -226,8 +226,9 @@ otherwise it falls back to `project_name` and adds `p_` when needed.
 
 ### 2) Add an OpenSearch source
 Secrets are stored via `secret_ref` (file path mounted into containers).
-`target_dataset` + `target_table_name` are required for puller processing.
-Sources without a valid target mapping are skipped by `opensearch-puller`.
+`target_table_name` is required for puller processing. `target_dataset` is optional metadata (defaults to `default`).
+`opensearch-puller` writes raw events directly into
+`<clickhouse_namespace>_bronze.<target_table_name>` and auto-creates the table if missing.
 Example (including routing target dataset/table):
 
 ```sql
@@ -237,7 +238,7 @@ INSERT INTO metadata.opensearch_sources (
 ) VALUES (
   'acme', 'acme-os', 'https://opensearch.acme.local:9200',
   'api_key', NULL, '/run/secrets/acme_os_key',
-  'logs-*', '@timestamp', 'wazuh', 'wazuh_events_raw', '{}'::jsonb
+  'logs-*', '@timestamp', 'bronze', 'arkime_sessions3_26', '{}'::jsonb
 );
 ```
 
@@ -250,6 +251,9 @@ This creates per-project databases and the `os_events_raw` table, and applies fi
 ```bash
 docker compose run --rm schema-migrator
 ```
+
+By default, metadata-driven Bronze Parsing is disabled in schema migrator
+(`ENABLE_METADATA_BRONZE_PARSING=false`).
 
 ### 4) Trigger a backfill
 Create a backfill job (or use ITSEC Datapipeline Manager):
@@ -278,6 +282,46 @@ Then run:
 ```bash
 docker compose run --rm schema-migrator
 ```
+
+### 6) Static bronze parser from existing raw table (no Bronze Parsing UI)
+If you already ingest raw OpenSearch rows into a ClickHouse table such as
+`bronze.arkime_sessions3_26`, use the template-based parser:
+
+- Template: `clickhouse/init/05_raw_table_ingest.sql.tmpl`
+- Runner: `clickhouse/init/05_raw_table_ingest.sh`
+
+Environment defaults in `docker-compose.yml`:
+- `ENABLE_RAW_TABLE_INGEST=true`
+- `RAW_SOURCE_TABLES=bronze.arkime_sessions3_26`
+
+You can set multiple raw source tables (comma-separated), for example:
+- `RAW_SOURCE_TABLES=bronze.arkime_sessions3_26,bronze.arkime_sessions3_27`
+
+Manual apply on a running stack:
+
+```bash
+docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_ingest.sh
+```
+
+This creates materialized views that parse events from one or more raw source tables into:
+- `bronze.suricata_events_raw`
+- `bronze.wazuh_events_raw`
+- `bronze.zeek_events_raw`
+
+Important: materialized views process only new inserts. If you need historical rows,
+run a one-time `INSERT INTO ... SELECT ...` backfill.
+
+Backfill order (recommended):
+1) Backfill OpenSearch data into raw table(s), e.g. `bronze.arkime_sessions3_26`.
+2) Ensure parser materialized views are installed via `05_raw_table_ingest.sh`.
+3) If raw historical data was loaded before the parser MVs existed, run a one-time parser backfill (`INSERT INTO ... SELECT ...`) from raw table(s) into:
+   - `bronze.suricata_events_raw`
+   - `bronze.wazuh_events_raw`
+   - `bronze.zeek_events_raw`
+4) Trigger Airflow gold DAG/backfill from parsed bronze to gold.
+
+Note:
+- If parser MVs are already installed before raw backfill starts, step (3) is usually not needed for new incoming data.
 
 ### OpenSearch puller config
 Environment variables:
@@ -336,8 +380,6 @@ User flow (typical):
 3) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
 4) Backfill: queue historical loads if needed.
 5) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
-6) Bronze Parsing: create per-project bronze tables (zeek/wazuh/suricata) sourced from
-   `<clickhouse_namespace>_bronze.os_events_raw`, then click "Apply Schema Changes" to build tables + materialized views.
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.
