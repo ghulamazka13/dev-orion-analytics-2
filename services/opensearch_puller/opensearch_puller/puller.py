@@ -928,11 +928,6 @@ def _process_index(
     throttle_seconds: Optional[float] = None,
 ) -> int:
     time_field = source["time_field"]
-    sort_candidates = [
-        [{time_field: "asc"}, {"_id": "asc"}],
-        [{time_field: "asc"}],
-    ]
-    sort_idx = 0
     pit_id: Optional[str] = None
     use_pit = os_client.pit_supported
     if use_pit:
@@ -947,6 +942,18 @@ def _process_index(
                 logging.info("PIT endpoint is unsupported by OpenSearch. Using regular search only.")
             else:
                 logging.warning("Failed to open PIT for %s (%s). Falling back to regular search.", index_name, exc)
+
+    # Prefer PIT-friendly tie-breaker and avoid _id sort (can trigger fielddata circuit breaker).
+    if use_pit:
+        sort_candidates = [
+            [{time_field: "asc"}, {"_shard_doc": "asc"}],
+            [{time_field: "asc"}],
+        ]
+    else:
+        sort_candidates = [
+            [{time_field: "asc"}],
+        ]
+    sort_idx = 0
     total = 0
     try:
         while True:
