@@ -483,6 +483,7 @@ def _ensure_default_bronze_columns(ch: ClickHouseClient) -> None:
         ch.execute(
             f"ALTER TABLE bronze.{table} "
             "ADD COLUMN IF NOT EXISTS raw String, "
+            "ADD COLUMN IF NOT EXISTS raw_hit String DEFAULT '', "
             "ADD COLUMN IF NOT EXISTS extras Map(String, String) DEFAULT map()"
         )
 
@@ -504,6 +505,7 @@ def _ensure_project_storage(ch: ClickHouseClient, db_prefix: str) -> None:
           index_name String,
           source_id String,
           raw String,
+          raw_hit String DEFAULT '',
           ingested_at DateTime64(3),
           extras Map(String, String) DEFAULT map()
         )
@@ -511,6 +513,10 @@ def _ensure_project_storage(ch: ClickHouseClient, db_prefix: str) -> None:
         PARTITION BY toDate(event_ts)
         ORDER BY (source_id, toDate(event_ts), event_ts, event_id)
         """
+    )
+    ch.execute(
+        f"ALTER TABLE {os_table} "
+        "ADD COLUMN IF NOT EXISTS raw_hit String DEFAULT ''"
     )
 
 

@@ -442,6 +442,7 @@ class ClickHouseWriter:
             self.execute_sql(
                 f"ALTER TABLE bronze.{table} "
                 "ADD COLUMN IF NOT EXISTS raw String, "
+                "ADD COLUMN IF NOT EXISTS raw_hit String DEFAULT '', "
                 "ADD COLUMN IF NOT EXISTS extras Map(String, String) DEFAULT map()"
             )
 
@@ -454,6 +455,7 @@ class ClickHouseWriter:
               index_name String,
               source_id String,
               raw String,
+              raw_hit String DEFAULT '',
               ingested_at DateTime64(3),
               extras Map(String, String) DEFAULT map()
             )
@@ -461,6 +463,10 @@ class ClickHouseWriter:
             PARTITION BY toDate(event_ts)
             ORDER BY (source_id, toDate(event_ts), event_ts, event_id)
             """
+        )
+        self.execute_sql(
+            f"ALTER TABLE {qualified_table} "
+            "ADD COLUMN IF NOT EXISTS raw_hit String DEFAULT ''"
         )
 
     def ensure_target_raw_table(self, database_name: str, table_name: str) -> None:
@@ -765,15 +771,26 @@ def _build_rows(
             logging.warning("Skipping hit without parsable %s timestamp", time_field)
             continue
         event_id = hit.get("_id") or source.get("event_id") or ""
+        index_name = str(hit.get("_index") or "")
+        metadata = {
+            "_index": index_name,
+        }
+        for key in ("_id", "_version", "_score", "_type"):
+            value = hit.get(key)
+            if value is not None:
+                metadata[key] = str(value)
         rows.append(
             {
                 "event_id": str(event_id),
                 "event_ts": format_timestamp_ch(event_ts),
-                "index_name": hit.get("_index") or "",
+                "index_name": index_name,
                 "source_id": str(source_id),
+                # Keep raw as _source-only payload for existing parser mappings.
                 "raw": json.dumps(source, separators=(",", ":")),
+                # Store complete OpenSearch hit for troubleshooting/replay parity.
+                "raw_hit": json.dumps(hit, separators=(",", ":")),
                 "ingested_at": ingested_at,
-                "extras": {"_index": hit.get("_index") or ""},
+                "extras": metadata,
             }
         )
     return rows
