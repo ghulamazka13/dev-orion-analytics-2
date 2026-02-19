@@ -1,0 +1,287 @@
+DROP TABLE IF EXISTS bronze.suricata_events_mv;
+DROP TABLE IF EXISTS bronze.wazuh_events_mv;
+DROP TABLE IF EXISTS bronze.zeek_events_mv;
+
+CREATE MATERIALIZED VIEW bronze.suricata_events_mv
+TO bronze.suricata_events_raw
+AS
+SELECT
+  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  toTimeZone(
+    coalesce(
+      event_ts,
+      parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
+      parseDateTime64BestEffortOrNull(JSON_VALUE(raw, '$.suricata.timestamp'))
+    ),
+    'Asia/Jakarta'
+  ) AS event_ts,
+  coalesce(
+    JSON_VALUE(raw, '$.event.provider'),
+    JSON_VALUE(raw, '$.event.module')
+  ) AS sensor_type,
+  coalesce(
+    JSON_VALUE(raw, '$.agent.name'),
+    JSON_VALUE(raw, '$.host.name'),
+    JSONExtractString(raw, 'node')
+  ) AS sensor_name,
+  coalesce(
+    JSON_VALUE(raw, '$.event.dataset'),
+    JSON_VALUE(raw, '$.event.kind')
+  ) AS event_type,
+  coalesce(
+    JSON_VALUE(raw, '$.suricata.alert.severity'),
+    JSON_VALUE(raw, '$.event.severity')
+  ) AS severity,
+  toIPv6OrNull(JSON_VALUE(raw, '$.source.ip')) AS src_ip,
+  toIPv6OrNull(JSON_VALUE(raw, '$.destination.ip')) AS dest_ip,
+  toInt32OrNull(JSON_VALUE(raw, '$.source.port')) AS src_port,
+  toInt32OrNull(JSON_VALUE(raw, '$.destination.port')) AS dest_port,
+  nullIf(JSON_VALUE(raw, '$.network.community_id'), '') AS community_id,
+  toFloat64OrNull(JSON_VALUE(raw, '$.event.duration')) AS duration,
+  nullIf(JSON_VALUE(raw, '$.suricata.ether.dest_mac'), '') as dest_mac,
+  nullIf(JSON_VALUE(raw, '$.suricata.ether.src_mac'), '') as src_mac,
+  nullIf(JSON_VALUE(raw, '$.related.mac[0]'), '') as mac,
+  toFloat64OrNull(JSON_VALUE(raw, '$.source.geo.location.lat')) as latitude,
+  toFloat64OrNull(JSON_VALUE(raw, '$.source.geo.location.lon')) as longitude,
+  nullIf(JSON_VALUE(raw, '$.source.geo.country_name'), '') as country_name,
+  coalesce(
+    JSON_VALUE(raw, '$.network.application'),
+    JSON_VALUE(raw, '$.network.transport[0]'),
+    JSON_VALUE(raw, '$.network.protocol[0]'),
+    JSON_VALUE(raw, '$.protocol[0]')
+  ) AS protocol,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.totDataBytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.network.bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.client.bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.server.bytes'))
+  ) AS bytes,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.network.packets')),
+    toInt64OrNull(JSON_VALUE(raw, '$.client.packets')),
+    toInt64OrNull(JSON_VALUE(raw, '$.server.packets'))
+  ) AS packets,
+  JSON_VALUE(raw, '$.suricata.flow_id') AS flow_id,
+  coalesce(
+    JSON_VALUE(raw, '$.rule.name'),
+    JSON_VALUE(raw, '$.suricata.alert.signature')
+  ) AS signature,
+  toInt32OrNull(JSON_VALUE(raw, '$.rule.id')) AS signature_id,
+  JSON_VALUE(raw, '$.rule.category[0]') AS category,
+  JSON_VALUE(raw, '$.suricata.alert.action') AS alert_action,
+  JSON_VALUE(raw, '$.suricata.http.url') AS http_url,
+  ifNull(
+    JSONExtract(raw, 'tags', 'Array(String)'),
+    ifNull(JSONExtract(JSONExtractRaw(raw, 'event'), 'severity_tags', 'Array(String)'), [])
+  ) AS tags,
+  coalesce(
+    JSONExtractString(raw, 'message'),
+    JSON_VALUE(raw, '$.event.original'),
+    JSON_VALUE(raw, '$.rule.name')
+  ) AS message,
+  raw AS raw_data
+FROM {{RAW_SOURCE_FROM}}
+WHERE (
+  JSONHas(raw, 'suricata')
+  OR JSON_VALUE(raw, '$.event.module') = 'suricata'
+  OR JSON_VALUE(raw, '$.event.provider') = 'suricata'
+)
+  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';
+
+CREATE MATERIALIZED VIEW bronze.wazuh_events_mv
+TO bronze.wazuh_events_raw
+AS
+SELECT
+  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  toTimeZone(
+    coalesce(
+      event_ts,
+      parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
+      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
+      fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.start'))),
+      fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.end')))
+    ),
+    'Asia/Jakarta'
+  ) AS event_ts,
+  toTimeZone(
+    coalesce(
+      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
+      ingested_at
+    ),
+    'Asia/Jakarta'
+  ) AS event_ingested_ts,
+  toTimeZone(
+    fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.start'))),
+    'Asia/Jakarta'
+  ) AS event_start_ts,
+  toTimeZone(
+    fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.end'))),
+    'Asia/Jakarta'
+  ) AS event_end_ts,
+  JSON_VALUE(raw, '$.event.dataset') AS event_dataset,
+  JSON_VALUE(raw, '$.event.kind') AS event_kind,
+  JSON_VALUE(raw, '$.event.module') AS event_module,
+  JSON_VALUE(raw, '$.event.provider') AS event_provider,
+  JSON_VALUE(raw, '$.agent.name') AS agent_name,
+  toIPv6OrNull(JSON_VALUE(raw, '$.agent.ip')) AS agent_ip,
+  JSON_VALUE(raw, '$.host.name') AS host_name,
+  toIPv6OrNull(JSON_VALUE(raw, '$.host.ip')) AS host_ip,
+  JSON_VALUE(raw, '$.rule.id') AS rule_id,
+  toInt32OrNull(JSON_VALUE(raw, '$.rule.level')) AS rule_level,
+  JSON_VALUE(raw, '$.rule.name') AS rule_name,
+  JSONExtractRaw(JSONExtractRaw(raw, 'rule'), 'ruleset') AS rule_ruleset,
+  ifNull(JSONExtract(raw, 'tags', 'Array(String)'), []) AS tags,
+  coalesce(JSONExtractString(raw, 'message'), JSON_VALUE(raw, '$.rule.name')) AS message,
+  raw AS raw_data
+FROM {{RAW_SOURCE_FROM}}
+WHERE (
+  JSON_VALUE(raw, '$.event.provider') = 'wazuh'
+  OR JSONHas(raw, 'wazuh')
+)
+  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';
+
+CREATE MATERIALIZED VIEW bronze.zeek_events_mv
+TO bronze.zeek_events_raw
+AS
+SELECT
+  coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) AS event_id,
+  toTimeZone(
+    coalesce(
+      event_ts,
+      parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
+      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.zeek.ts'), '')),
+      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
+      fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.start')))
+    ),
+    'Asia/Jakarta'
+  ) AS event_ts,
+  toTimeZone(
+    coalesce(
+      parseDateTime64BestEffortOrNull(nullIf(JSON_VALUE(raw, '$.event.ingested'), '')),
+      ingested_at
+    ),
+    'Asia/Jakarta'
+  ) AS event_ingested_ts,
+  toTimeZone(
+    fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.start'))),
+    'Asia/Jakarta'
+  ) AS event_start_ts,
+  toTimeZone(
+    fromUnixTimestamp64Milli(toInt64OrNull(JSON_VALUE(raw, '$.event.end'))),
+    'Asia/Jakarta'
+  ) AS event_end_ts,
+  JSON_VALUE(raw, '$.event.dataset') AS event_dataset,
+  JSON_VALUE(raw, '$.event.kind') AS event_kind,
+  JSON_VALUE(raw, '$.event.module') AS event_module,
+  JSON_VALUE(raw, '$.event.provider') AS event_provider,
+  coalesce(
+    JSON_VALUE(raw, '$.zeek.uid'),
+    JSON_VALUE(raw, '$.event.id[0]')
+  ) AS zeek_uid,
+  coalesce(
+    JSON_VALUE(raw, '$.agent.name'),
+    JSON_VALUE(raw, '$.host.name'),
+    JSONExtractString(raw, 'node')
+  ) AS sensor_name,
+  toIPv6OrNull(JSON_VALUE(raw, '$.source.ip')) AS src_ip,
+  toIPv6OrNull(JSON_VALUE(raw, '$.destination.ip')) AS dest_ip,
+  toInt32OrNull(JSON_VALUE(raw, '$.source.port')) AS src_port,
+  toInt32OrNull(JSON_VALUE(raw, '$.destination.port')) AS dest_port,
+   toFloat64OrNull(
+    coalesce(
+      nullIf(JSON_VALUE(raw, '$.source.geo.location.lat'), ''),
+      nullIf(JSON_VALUE(raw, '$.source.geo.latitude'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.location.lat'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.latitude'), '')
+    )
+  ) AS geo_latitude,
+  toFloat64OrNull(
+    coalesce(
+      nullIf(JSON_VALUE(raw, '$.source.geo.location.lon'), ''),
+      nullIf(JSON_VALUE(raw, '$.source.geo.longitude'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.location.lon'), ''),
+      nullIf(JSON_VALUE(raw, '$.destination.geo.longitude'), '')
+    )
+  ) AS geo_longitude,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_iso_code'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_code2'), ''),
+    nullIf(JSON_VALUE(raw, '$.source.geo.country_code3'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_iso_code'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_code2'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.country_code3'), '')
+  ) AS geo_country,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.geo.city_name'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.geo.city_name'), '')
+  ) AS geo_city_name,
+  coalesce(
+    nullIf(JSON_VALUE(raw, '$.source.mac[0]'), ''),
+    nullIf(JSON_VALUE(raw, '$.destination.mac[0]'), '')
+  ) AS mac_address,
+  coalesce(
+    JSON_VALUE(raw, '$.network.application'),
+    JSON_VALUE(raw, '$.network.transport[0]'),
+    JSON_VALUE(raw, '$.network.protocol[0]'),
+    JSON_VALUE(raw, '$.protocol[0]')
+  ) AS protocol,
+  JSON_VALUE(raw, '$.network.application') AS application,
+  JSON_VALUE(raw, '$.network.type') AS network_type,
+  JSON_VALUE(raw, '$.network.direction') AS direction,
+  JSON_VALUE(raw, '$.network.community_id') AS community_id,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.totDataBytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.network.bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.source.bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.destination.bytes'))
+  ) AS bytes,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.network.packets')),
+    toInt64OrNull(JSON_VALUE(raw, '$.source.packets')),
+    toInt64OrNull(JSON_VALUE(raw, '$.destination.packets'))
+  ) AS packets,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.orig_bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.orig_ip_bytes'))
+  ) AS orig_bytes,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.resp_bytes')),
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.resp_ip_bytes'))
+  ) AS resp_bytes,
+  toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.orig_pkts')) AS orig_pkts,
+  toInt64OrNull(JSON_VALUE(raw, '$.zeek.conn.resp_pkts')) AS resp_pkts,
+  JSON_VALUE(raw, '$.zeek.conn.conn_state') AS conn_state,
+  JSON_VALUE(raw, '$.zeek.conn.conn_state_description') AS conn_state_description,
+  toFloat64OrNull(JSON_VALUE(raw, '$.zeek.conn.duration')) AS duration,
+  JSON_VALUE(raw, '$.zeek.conn.history') AS history,
+  coalesce(
+    JSON_VALUE(raw, '$.zeek.conn.vlan'),
+    JSON_VALUE(raw, '$.network.vlan.id[0]')
+  ) AS vlan_id,
+  ifNull(
+    JSONExtract(raw, 'tags', 'Array(String)'),
+    ifNull(
+      JSONExtract(JSONExtractRaw(raw, 'event'), 'category', 'Array(String)'),
+      ifNull(JSONExtract(JSONExtractRaw(raw, 'event'), 'severity_tags', 'Array(String)'), [])
+    )
+  ) AS tags,
+  coalesce(
+    JSON_VALUE(raw, '$.zeek.http.host'),
+    JSON_VALUE(raw, '$.zeek.dns.query'),
+    JSON_VALUE(raw, '$.zeek.ssl.server_name')
+  ) AS domain,
+  coalesce(
+    JSONExtractString(raw, 'message'),
+    JSON_VALUE(raw, '$.event.original'),
+    JSON_VALUE(raw, '$.zeek.conn.conn_state_description')
+  ) AS message,
+  raw AS raw_data
+FROM {{RAW_SOURCE_FROM}}
+WHERE (
+  JSONHas(raw, 'zeek')
+  OR JSON_VALUE(raw, '$.event.module') = 'zeek'
+  OR JSON_VALUE(raw, '$.event.provider') = 'zeek'
+)
+  AND coalesce(nullIf(event_id, ''), JSON_VALUE(raw, '$.event.hash')) != '';

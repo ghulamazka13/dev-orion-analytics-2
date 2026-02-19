@@ -28,6 +28,8 @@ services:
       - CLICKHOUSE_PASSWORD=admin
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
       - ENABLE_KAFKA_INGEST=${ENABLE_KAFKA_INGEST:-false}
+      - ENABLE_RAW_TABLE_INGEST=${ENABLE_RAW_TABLE_INGEST:-true}
+      - RAW_SOURCE_TABLE=${RAW_SOURCE_TABLE:-bronze.arkime_sessions3_26}
       - KAFKA_BROKER_LIST=${KAFKA_BROKER_LIST:-10.110.12.20:9092}
       - KAFKA_TOPIC_LIST=${KAFKA_TOPIC_LIST:-malcolm-logs}
       - KAFKA_GROUP_SUFFIX=${HOSTNAME}
@@ -238,6 +240,7 @@ services:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
       - LOG_LEVEL=INFO
+      - ENABLE_METADATA_BRONZE_PARSING=${ENABLE_METADATA_BRONZE_PARSING:-false}
     depends_on:
       - postgres
       - clickhouse

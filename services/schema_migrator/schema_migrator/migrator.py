@@ -641,13 +641,22 @@ def apply_schema(collect_results: bool = False):
         conn.autocommit = True
         projects = _fetch_projects(conn)
         field_rows = _fetch_field_registry(conn)
-        try:
-            bronze_tables = _fetch_bronze_event_tables(conn)
-            bronze_fields = _fetch_bronze_event_fields(conn)
-        except Exception as exc:
-            logging.warning("Bronze parsing tables not available: %s", exc)
-            bronze_tables = []
-            bronze_fields = []
+        bronze_tables = []
+        bronze_fields = []
+        if config.ENABLE_METADATA_BRONZE_PARSING:
+            try:
+                bronze_tables = _fetch_bronze_event_tables(conn)
+                bronze_fields = _fetch_bronze_event_fields(conn)
+            except Exception as exc:
+                logging.warning("Bronze parsing tables not available: %s", exc)
+                bronze_tables = []
+                bronze_fields = []
+        else:
+            logging.info(
+                "Skipping metadata bronze parsing "
+                "(ENABLE_METADATA_BRONZE_PARSING=%s)",
+                config.ENABLE_METADATA_BRONZE_PARSING,
+            )
 
     project_ids = [row["project_id"] for row in projects]
     project_db_map = _build_project_db_map(projects)
@@ -664,15 +673,17 @@ def apply_schema(collect_results: bool = False):
         logging.info("Ensuring project storage for %s (db_prefix=%s)", project_id, db_prefix)
         _ensure_project_storage(ch, db_prefix)
 
-    logging.info("Applying bronze event tables (%d entries)", len(bronze_tables))
-    bronze_results = _apply_bronze_event_tables(
-        ch,
-        bronze_tables,
-        bronze_fields,
-        project_ids,
-        project_db_map=project_db_map,
-        collect_results=collect_results,
-    )
+    bronze_results = []
+    if config.ENABLE_METADATA_BRONZE_PARSING:
+        logging.info("Applying bronze event tables (%d entries)", len(bronze_tables))
+        bronze_results = _apply_bronze_event_tables(
+            ch,
+            bronze_tables,
+            bronze_fields,
+            project_ids,
+            project_db_map=project_db_map,
+            collect_results=collect_results,
+        )
 
     logging.info("Applying field registry (%d entries)", len(field_rows))
     field_results = _apply_field_registry(
