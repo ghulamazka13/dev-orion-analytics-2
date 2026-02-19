@@ -503,6 +503,8 @@ class OpenSearchClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.verify_ssl = config.OPENSEARCH_VERIFY_SSL
+        self._pit_supported = True
+        self._pit_api_preference: Optional[str] = None
 
         auth_type = (auth_type or "").strip().lower()
         if auth_type == "basic" and username and secret:
@@ -511,6 +513,22 @@ class OpenSearchClient:
             self.session.headers["Authorization"] = f"ApiKey {secret}"
         elif auth_type == "bearer" and secret:
             self.session.headers["Authorization"] = f"Bearer {secret}"
+
+    @property
+    def pit_supported(self) -> bool:
+        return self._pit_supported
+
+    @staticmethod
+    def _is_pit_no_handler(exc: requests.HTTPError) -> bool:
+        response = exc.response
+        if response is None:
+            return False
+        body = (response.text or "").lower()
+        return response.status_code in {400, 404, 405} and (
+            "no handler found for uri" in body
+            or "unknown endpoint" in body
+            or "unsupported" in body
+        )
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self.base_url}{path}"
@@ -565,21 +583,69 @@ class OpenSearchClient:
         return sorted(set(indices))
 
     def open_pit(self, index_name: str) -> str:
-        response = self._request(
-            "POST",
-            f"/{index_name}/_pit",
-            params={"keep_alive": "1m"},
-        )
-        pit_id = response.json().get("id")
-        if not pit_id:
-            raise RuntimeError("OpenSearch PIT id missing")
-        return pit_id
+        if not self._pit_supported:
+            raise RuntimeError("PIT unsupported")
+
+        candidates: List[Tuple[str, str]] = []
+        if self._pit_api_preference == "opensearch":
+            candidates = [("opensearch", f"/{index_name}/_search/point_in_time")]
+        elif self._pit_api_preference == "elasticsearch":
+            candidates = [("elasticsearch", f"/{index_name}/_pit")]
+        else:
+            candidates = [
+                ("opensearch", f"/{index_name}/_search/point_in_time"),
+                ("elasticsearch", f"/{index_name}/_pit"),
+            ]
+
+        last_exc: Optional[Exception] = None
+        for api_name, path in candidates:
+            try:
+                response = self._request("POST", path, params={"keep_alive": "1m"})
+            except requests.HTTPError as exc:
+                last_exc = exc
+                if self._is_pit_no_handler(exc):
+                    continue
+                raise
+            payload = response.json()
+            pit_id = payload.get("pit_id") or payload.get("id")
+            if pit_id:
+                self._pit_api_preference = api_name
+                return pit_id
+            last_exc = RuntimeError(f"OpenSearch PIT id missing (api={api_name})")
+
+        self._pit_supported = False
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("PIT unsupported")
 
     def close_pit(self, pit_id: str) -> None:
-        try:
-            self._request("DELETE", "/_pit", json={"id": pit_id})
-        except requests.RequestException:
-            logging.warning("Failed to close PIT %s", pit_id)
+        if not self._pit_supported:
+            return
+
+        close_candidates: List[Tuple[str, Dict[str, str]]] = []
+        if self._pit_api_preference == "opensearch":
+            close_candidates = [("/_search/point_in_time", {"pit_id": pit_id})]
+        elif self._pit_api_preference == "elasticsearch":
+            close_candidates = [("/_pit", {"id": pit_id})]
+        else:
+            close_candidates = [
+                ("/_search/point_in_time", {"pit_id": pit_id}),
+                ("/_pit", {"id": pit_id}),
+            ]
+
+        for path, payload in close_candidates:
+            try:
+                self._request("DELETE", path, json=payload)
+                return
+            except requests.HTTPError as exc:
+                if self._is_pit_no_handler(exc):
+                    continue
+                logging.warning("Failed to close PIT %s using %s: %s", pit_id, path, exc)
+                return
+            except requests.RequestException as exc:
+                logging.warning("Failed to close PIT %s using %s: %s", pit_id, path, exc)
+                return
+        logging.warning("Failed to close PIT %s: no compatible endpoint", pit_id)
 
     def search(self, body: Dict[str, Any], index_name: Optional[str] = None) -> Dict[str, Any]:
         path = f"/{index_name}/_search" if index_name else "/_search"
@@ -868,15 +934,19 @@ def _process_index(
     ]
     sort_idx = 0
     pit_id: Optional[str] = None
-    use_pit = True
-    try:
-        pit_id = os_client.open_pit(index_name)
-    except requests.RequestException as exc:
-        use_pit = False
-        logging.warning("PIT not available for %s (%s). Falling back to regular search.", index_name, exc)
-    except Exception as exc:
-        use_pit = False
-        logging.warning("Failed to open PIT for %s (%s). Falling back to regular search.", index_name, exc)
+    use_pit = os_client.pit_supported
+    if use_pit:
+        try:
+            pit_id = os_client.open_pit(index_name)
+        except requests.RequestException as exc:
+            use_pit = False
+            logging.warning("PIT not available for %s (%s). Falling back to regular search.", index_name, exc)
+        except Exception as exc:
+            use_pit = False
+            if str(exc) == "PIT unsupported":
+                logging.info("PIT endpoint is unsupported by OpenSearch. Using regular search only.")
+            else:
+                logging.warning("Failed to open PIT for %s (%s). Falling back to regular search.", index_name, exc)
     total = 0
     try:
         while True:
