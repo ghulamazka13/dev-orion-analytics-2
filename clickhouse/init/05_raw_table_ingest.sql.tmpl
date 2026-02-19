@@ -5,7 +5,6 @@ DROP TABLE IF EXISTS bronze.zeek_events_mv;
 CREATE MATERIALIZED VIEW bronze.suricata_events_mv
 TO bronze.suricata_events_raw
 AS
-AS
 SELECT
   JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
