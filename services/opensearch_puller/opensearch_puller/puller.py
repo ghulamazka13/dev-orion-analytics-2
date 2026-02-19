@@ -526,6 +526,16 @@ class OpenSearchClient:
                 response.raise_for_status()
                 return response
             except requests.RequestException as exc:
+                if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                    body = (exc.response.text or "").strip()
+                    if body:
+                        preview = body[:800]
+                        logging.warning(
+                            "OpenSearch error body (status=%s, url=%s): %s",
+                            exc.response.status_code,
+                            url,
+                            preview,
+                        )
                 if attempt >= config.MAX_RETRIES - 1:
                     raise
                 sleep_for = config.BACKOFF_BASE_SECONDS * (2**attempt)
@@ -852,6 +862,11 @@ def _process_index(
     throttle_seconds: Optional[float] = None,
 ) -> int:
     time_field = source["time_field"]
+    sort_candidates = [
+        [{time_field: "asc"}, {"_id": "asc"}],
+        [{time_field: "asc"}],
+    ]
+    sort_idx = 0
     pit_id: Optional[str] = None
     use_pit = True
     try:
@@ -865,22 +880,45 @@ def _process_index(
     total = 0
     try:
         while True:
+            current_sort = sort_candidates[sort_idx]
             body: Dict[str, Any] = {
                 "size": config.BATCH_SIZE,
-                "sort": [{time_field: "asc"}, {"_id": "asc"}],
+                "sort": current_sort,
                 "track_total_hits": False,
                 "query": _build_query(time_field, start_ts, end_ts, source.get("query_filter_json")),
             }
             if use_pit and pit_id:
                 body["pit"] = {"id": pit_id, "keep_alive": "1m"}
             if search_after:
-                body["search_after"] = search_after
+                if len(search_after) == len(current_sort):
+                    body["search_after"] = search_after
+                else:
+                    logging.warning(
+                        "Resetting search_after for %s because sort size changed (%s -> %s)",
+                        index_name,
+                        len(search_after),
+                        len(current_sort),
+                    )
+                    search_after = None
 
             if cancel_check and not cancel_check():
                 logging.info("Backfill cancelled while processing %s", index_name)
                 break
 
-            response = os_client.search(body, None if use_pit else index_name)
+            try:
+                response = os_client.search(body, None if use_pit else index_name)
+            except requests.HTTPError as exc:
+                if sort_idx + 1 < len(sort_candidates):
+                    logging.warning(
+                        "Search failed on %s with sort=%s (%s). Retrying with fallback sort.",
+                        index_name,
+                        current_sort,
+                        exc,
+                    )
+                    sort_idx += 1
+                    search_after = None
+                    continue
+                raise
             hits = response.get("hits", {}).get("hits", [])
             if not hits:
                 break
