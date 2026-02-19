@@ -85,6 +85,31 @@ CREATE TABLE IF NOT EXISTS metadata.backfill_jobs (
     ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS metadata.file_export_jobs (
+  job_id BIGSERIAL PRIMARY KEY,
+  source_id BIGINT NOT NULL,
+  source_name TEXT NOT NULL,
+  index_name TEXT NOT NULL,
+  start_ts TIMESTAMPTZ NOT NULL,
+  end_ts TIMESTAMPTZ NOT NULL,
+  file_format TEXT NOT NULL,
+  bucket_name TEXT NOT NULL,
+  folder_prefix TEXT,
+  object_key TEXT,
+  row_count BIGINT,
+  file_size_bytes BIGINT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by TEXT,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT file_export_jobs_source_fk
+    FOREIGN KEY (source_id)
+    REFERENCES metadata.opensearch_sources (source_id)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
   worker_id TEXT PRIMARY KEY,
   worker_type TEXT NOT NULL,
@@ -201,6 +226,12 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_state_status
 
 CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status
   ON metadata.backfill_jobs (status);
+
+CREATE INDEX IF NOT EXISTS idx_file_export_jobs_status
+  ON metadata.file_export_jobs (status);
+
+CREATE INDEX IF NOT EXISTS idx_file_export_jobs_created_at
+  ON metadata.file_export_jobs (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_seen
   ON metadata.worker_heartbeats (last_seen);

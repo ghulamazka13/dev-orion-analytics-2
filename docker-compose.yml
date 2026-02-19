@@ -29,13 +29,29 @@ services:
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
       - ENABLE_KAFKA_INGEST=${ENABLE_KAFKA_INGEST:-false}
       - ENABLE_RAW_TABLE_INGEST=${ENABLE_RAW_TABLE_INGEST:-true}
-      - RAW_SOURCE_TABLE=${RAW_SOURCE_TABLE:-bronze.arkime_sessions3_26}
+      - RAW_SOURCE_TABLES=${RAW_SOURCE_TABLES:-bronze.arkime_sessions3_26}
       - KAFKA_BROKER_LIST=${KAFKA_BROKER_LIST:-10.110.12.20:9092}
       - KAFKA_TOPIC_LIST=${KAFKA_TOPIC_LIST:-malcolm-logs}
       - KAFKA_GROUP_SUFFIX=${HOSTNAME}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+
+  seaweedfs:
+    image: chrislusf/seaweedfs
+    command:
+      - "server"
+      - "-s3"
+      - "-ip.bind=0.0.0.0"
+      - "-dir=/data"
+      - "-volume.max=0"
+    ports:
+      - "18333:8333"
+      - "18888:8888"
+      - "19333:9333"
+    volumes:
+      - seaweed_data:/data
     restart: unless-stopped
 
   chouse:
@@ -221,10 +237,16 @@ services:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
       - OPENSEARCH_VERIFY_SSL=true
+      - SEAWEED_S3_ENDPOINT=${SEAWEED_S3_ENDPOINT:-http://seaweedfs:8333}
+      - SEAWEED_S3_REGION=${SEAWEED_S3_REGION:-us-east-1}
+      - SEAWEED_S3_ACCESS_KEY=${SEAWEED_S3_ACCESS_KEY:-}
+      - SEAWEED_S3_SECRET_KEY=${SEAWEED_S3_SECRET_KEY:-}
+      - SEAWEED_S3_VERIFY_SSL=${SEAWEED_S3_VERIFY_SSL:-false}
       - ITSEC_UI_USER=admin
       - ITSEC_UI_PASSWORD=admin123!
       - ITSEC_SECRET_KEY=${ITSEC_SECRET_KEY:-}
       - ITSEC_PAGE_SIZE=20
+      - ITSEC_FILE_EXPORT_BATCH_SIZE=${ITSEC_FILE_EXPORT_BATCH_SIZE:-1000}
     volumes:
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -250,5 +272,6 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
+  seaweed_data:
   chouse_data:
   superset_data:
