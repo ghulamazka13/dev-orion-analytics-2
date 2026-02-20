@@ -41,8 +41,12 @@ def bucket_exists(client: BaseClient, bucket_name: str) -> bool:
     try:
         client.head_bucket(Bucket=bucket_name)
         return True
-    except ClientError:
-        return False
+    except ClientError as exc:
+        error_code = str(exc.response.get("Error", {}).get("Code", "")).strip()
+        status_code = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) or 0)
+        if error_code in {"404", "NoSuchBucket", "NotFound"} or status_code == 404:
+            return False
+        raise
 
 
 def normalize_prefix(prefix: Optional[str]) -> str:

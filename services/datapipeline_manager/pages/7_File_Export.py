@@ -431,6 +431,11 @@ loaded_indices = []
 if selected_source and st.session_state.get("file_export_source_id") == int(selected_source["source_id"]):
     loaded_indices = list(st.session_state.get("file_export_indices") or [])
 
+configured_bucket = (config.SEAWEED_S3_BUCKET or "").strip()
+if not configured_bucket:
+    st.error("SeaweedFS bucket is not configured. Set SEAWEED_S3_BUCKET in the service environment.")
+    st.stop()
+
 with st.form("file_export_form"):
     st.markdown("### Export Configuration")
     if loaded_indices:
@@ -452,7 +457,12 @@ with st.form("file_export_form"):
         end_time = st.time_input("End Time (UTC)", value=time(23, 59))
 
     format_value = st.selectbox("File Format", options=["csv", "parquet", "zip"], index=0)
-    bucket_name = st.text_input("Bucket Name", value="")
+    st.text_input(
+        "Bucket Name",
+        value=configured_bucket,
+        disabled=True,
+        help="Bucket is fixed by configuration (SEAWEED_S3_BUCKET).",
+    )
     folder_prefix = st.text_input("Folder Prefix", value="", help="Optional. Example: exports/security/")
     requested_by = st.text_input(
         "Requested By",
@@ -469,8 +479,6 @@ if submitted:
         st.error("Source is required.")
     elif not selected_indices:
         st.error("Select at least one index.")
-    elif not bucket_name.strip():
-        st.error("Bucket name is required.")
     else:
         start_ts = datetime.combine(start_date, start_time, tzinfo=timezone.utc)
         end_ts = datetime.combine(end_date, end_time, tzinfo=timezone.utc)
@@ -481,11 +489,8 @@ if submitted:
         try:
             client = seaweed.s3_client()
             normalized_prefix = seaweed.normalize_prefix(folder_prefix)
-            if not seaweed.bucket_exists(client, bucket_name.strip()):
-                st.error("Bucket doesn't exist.")
-                st.stop()
-            if normalized_prefix and not seaweed.folder_exists(client, bucket_name.strip(), normalized_prefix):
-                st.error("Bucket doesn't exist.")
+            if not seaweed.bucket_exists(client, configured_bucket):
+                st.error(f"Configured bucket '{configured_bucket}' doesn't exist.")
                 st.stop()
         except ValueError as exc:
             st.error(str(exc))
@@ -521,7 +526,7 @@ if submitted:
                     start_ts,
                     end_ts,
                     format_value,
-                    bucket_name.strip(),
+                    configured_bucket,
                     normalized_prefix,
                     requested_by.strip() or "admin",
                 )
@@ -542,7 +547,7 @@ if submitted:
                         file_path = _rows_to_file(rows, format_value, index_name, start_ts, end_ts, tmpdir)
                         file_size = seaweed.file_size_bytes(file_path)
                         object_key = normalized_prefix + Path(file_path).name
-                        seaweed.upload_file(client, file_path, bucket_name.strip(), object_key)
+                        seaweed.upload_file(client, file_path, configured_bucket, object_key)
                         _set_job_completed(job_id, object_key, len(rows), file_size)
                     total_ok += 1
                 except Exception as exc:
