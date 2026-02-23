@@ -17,6 +17,7 @@ SEAWEED_S3_ENDPOINT = _get_env("SEAWEED_S3_ENDPOINT", "http://seaweedfs:8333")
 SEAWEED_S3_REGION = _get_env("SEAWEED_S3_REGION", "us-east-1")
 SEAWEED_S3_ACCESS_KEY = _get_env("SEAWEED_S3_ACCESS_KEY", "")
 SEAWEED_S3_SECRET_KEY = _get_env("SEAWEED_S3_SECRET_KEY", "")
+SEAWEED_S3_BUCKET = _get_env("SEAWEED_S3_BUCKET", "itsec-test")
 SEAWEED_S3_VERIFY_SSL = _get_env("SEAWEED_S3_VERIFY_SSL", "false").lower() not in {
     "0",
     "false",

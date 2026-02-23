@@ -6,7 +6,7 @@ CREATE MATERIALIZED VIEW bronze.suricata_events_mv
 TO bronze.suricata_events_raw
 AS
 SELECT
-  JSON_VALUE(raw, '$.event.hash') AS event_id,
+  coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
@@ -79,15 +79,15 @@ SELECT
     JSON_VALUE(raw, '$.rule.name')
   ) AS message,
   raw AS raw_data
-FROM bronze.security_events_kafka
+FROM {{RAW_SOURCE_FROM}}
 WHERE JSONHas(raw, 'suricata')
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
 
 CREATE MATERIALIZED VIEW bronze.wazuh_events_mv
 TO bronze.wazuh_events_raw
 AS
 SELECT
-  JSON_VALUE(raw, '$.event.hash') AS event_id,
+  coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
@@ -124,15 +124,15 @@ SELECT
   ifNull(JSONExtract(raw, 'tags', 'Array(String)'), []) AS tags,
   coalesce(JSONExtractString(raw, 'message'), JSON_VALUE(raw, '$.rule.name')) AS message,
   raw AS raw_data
-FROM bronze.security_events_kafka
+FROM {{RAW_SOURCE_FROM}}
 WHERE JSON_VALUE(raw, '$.event.provider') = 'wazuh'
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
 
 CREATE MATERIALIZED VIEW bronze.zeek_events_mv
 TO bronze.zeek_events_raw
 AS
 SELECT
-  JSON_VALUE(raw, '$.event.hash') AS event_id,
+  coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
       parseDateTime64BestEffortOrNull(nullIf(JSONExtractString(raw, '@timestamp'), '')),
@@ -262,6 +262,6 @@ SELECT
     JSON_VALUE(raw, '$.zeek.conn.conn_state_description')
   ) AS message,
   raw AS raw_data
-FROM bronze.security_events_kafka
-WHERE JSONHas(raw, 'zeek')
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+FROM {{RAW_SOURCE_FROM}}
+WHERE (JSONHas(raw, 'zeek') OR JSON_VALUE(raw, '$.event.module') = 'zeek' OR JSON_VALUE(raw, '$.event.provider') IN ('zeek','arkime'))
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
