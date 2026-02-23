@@ -946,7 +946,7 @@ def _process_index(
     # Prefer PIT-friendly tie-breaker and avoid _id sort (can trigger fielddata circuit breaker).
     if use_pit:
         sort_candidates = [
-            [{time_field: "asc"}, {"_shard_doc": "asc"}],
+            [{time_field: "asc"}, {"_doc": "asc"}],
             [{time_field: "asc"}],
         ]
     else:
