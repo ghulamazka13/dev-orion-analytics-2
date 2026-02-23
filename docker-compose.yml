@@ -233,6 +233,8 @@ services:
       dockerfile: services/datapipeline_manager/Dockerfile
     ports:
       - "18090:8081"
+    env_file:
+      - secrets/seaweed.env
     environment:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
