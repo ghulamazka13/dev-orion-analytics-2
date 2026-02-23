@@ -8,6 +8,7 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 - Postgres 16.3 (metadata store for dynamic DAGs)
 - Superset 4.0.1 for BI
 - CHouse UI for ClickHouse admin with RBAC
+- SeaweedFS (S3-compatible object storage)
 - OpenSearch Puller (metadata-driven ingestion)
 - ITSEC Datapipeline Manager (Streamlit) for onboarding + field registry + monitoring
 - Schema Migrator (ClickHouse DDL from metadata)
@@ -18,6 +19,10 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 - Airflow executes SQL templates in `airflow/dags/sql` based on Postgres metadata
 - Gold star schema (dims, facts, bridges) in `gold.*`
 - Superset and CHouse UI query gold
+
+`os_events_raw` stores two raw payload variants:
+- `raw`: `_source` payload (used by bronze parsing mappings)
+- `raw_hit`: full OpenSearch hit (`_index`, `_id`, `_source`, etc.) for parity/debugging
 
 See `FACT_DIM_ARCHITECTURE.md` for the star schema design.
 
@@ -43,6 +48,9 @@ docker compose ps
 - ClickHouse HTTP: http://localhost:18123
 - ClickHouse TCP: localhost:19000
 - Postgres: localhost:15432 (airflow/airflow, db `airflow`)
+- SeaweedFS S3 endpoint: http://localhost:18333
+- SeaweedFS Filer UI/API: http://localhost:18888
+- SeaweedFS Master UI/API: http://localhost:19333
 
 In CHouse UI, add a ClickHouse connection:
 - URL: http://clickhouse:8123
@@ -61,6 +69,11 @@ docker compose exec -T clickhouse clickhouse-client \
   --user etl_runner --password etl_runner \
   --query "SELECT count() FROM bronze.suricata_events_raw;"
 ```
+
+## SeaweedFS (S3-compatible storage)
+- Internal endpoint (for services in Docker network): `http://seaweedfs:8333`
+- Host endpoint (for local clients): `http://localhost:18333`
+- Current compose setup is for local development. Add authentication and TLS before exposing this service outside local/private networks.
 
 ## Access control
 ClickHouse RBAC is enabled on init.
@@ -288,7 +301,8 @@ If you already ingest raw OpenSearch rows into a ClickHouse table such as
 `bronze.arkime_sessions3_26`, use the template-based parser:
 
 - Template: `clickhouse/init/05_raw_table_ingest.sql.tmpl`
-- Runner: `clickhouse/init/05_raw_table_ingest.sh`
+- MV runner: `clickhouse/init/05_raw_table_ingest.sh`
+- Backfill runner: `clickhouse/init/05_raw_table_backfill.sh`
 
 Environment defaults in `docker-compose.yml`:
 - `ENABLE_RAW_TABLE_INGEST=true`
@@ -308,13 +322,31 @@ This creates materialized views that parse events from one or more raw source ta
 - `bronze.wazuh_events_raw`
 - `bronze.zeek_events_raw`
 
-Important: materialized views process only new inserts. If you need historical rows,
-run a one-time `INSERT INTO ... SELECT ...` backfill.
+Important: materialized views process only new inserts. For historical rows, run parser backfill:
+
+```bash
+docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_backfill.sh
+```
+
+Duplicate handling:
+- The parser SQL skips rows whose `event.hash` already exists in target parsed tables (`bronze.suricata_events_raw`, `bronze.wazuh_events_raw`, `bronze.zeek_events_raw`).
+- This applies to both MV ingestion and parser backfill generated from `05_raw_table_ingest.sql.tmpl`.
+
+Optional (override source tables for one run):
+
+```bash
+docker compose exec -T -e RAW_SOURCE_TABLES=bronze.arkime_sessions3_26,bronze.arkime_sessions3_27 clickhouse \
+  bash /docker-entrypoint-initdb.d/05_raw_table_backfill.sh
+```
 
 Backfill order (recommended):
 1) Backfill OpenSearch data into raw table(s), e.g. `bronze.arkime_sessions3_26`.
 2) Ensure parser materialized views are installed via `05_raw_table_ingest.sh`.
-3) If raw historical data was loaded before the parser MVs existed, run a one-time parser backfill (`INSERT INTO ... SELECT ...`) from raw table(s) into:
+3) If raw historical data was loaded before the parser MVs existed, run:
+   - `05_raw_table_backfill.sh` to fill parsed bronze tables from existing raw rows.
+   - This is one-time per historical window/source.
+   - It is append-only; rerun can create duplicates unless you clear target partitions/ranges first.
+   Parsed tables:
    - `bronze.suricata_events_raw`
    - `bronze.wazuh_events_raw`
    - `bronze.zeek_events_raw`
@@ -322,6 +354,117 @@ Backfill order (recommended):
 
 Note:
 - If parser MVs are already installed before raw backfill starts, step (3) is usually not needed for new incoming data.
+
+### 7) Stop / Resume pipeline
+Use these commands to stop specific stages safely.
+
+Stop OpenSearch ingest (raw load):
+
+```bash
+docker compose stop opensearch-puller
+```
+
+Stop bronze -> gold orchestration (Airflow):
+
+```bash
+docker compose exec -T airflow-webserver airflow dags pause gold_star_schema
+docker compose exec -T airflow-webserver airflow dags pause metadata_updater
+docker compose stop airflow-scheduler
+```
+
+Stop raw -> parsed bronze parser (materialized views):
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --multiquery --query "
+DROP TABLE IF EXISTS bronze.suricata_events_mv;
+DROP TABLE IF EXISTS bronze.wazuh_events_mv;
+DROP TABLE IF EXISTS bronze.zeek_events_mv;
+"
+```
+
+Cancel pending/running backfill jobs:
+
+```bash
+docker compose exec -T postgres psql -U airflow -d airflow -c "
+UPDATE metadata.backfill_jobs
+SET status='cancelled', updated_at=now()
+WHERE status IN ('pending','running');
+"
+```
+
+Resume pipeline:
+
+```bash
+docker compose start opensearch-puller airflow-scheduler
+docker compose exec -T airflow-webserver airflow dags unpause gold_star_schema
+docker compose exec -T airflow-webserver airflow dags unpause metadata_updater
+docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_ingest.sh
+```
+
+### 8) Data retention (TTL) and removing retention
+In this stack, retention is enforced in ClickHouse using table TTL.
+`metadata.projects.retention_days` is metadata only unless you apply TTL explicitly.
+
+Apply retention policy (example):
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --multiquery --query "
+ALTER TABLE bronze.arkime_sessions3_26 MODIFY TTL event_ts + INTERVAL 90 DAY DELETE;
+ALTER TABLE bronze.suricata_events_raw MODIFY TTL event_ts + INTERVAL 90 DAY DELETE;
+ALTER TABLE bronze.wazuh_events_raw MODIFY TTL event_ts + INTERVAL 90 DAY DELETE;
+ALTER TABLE bronze.zeek_events_raw MODIFY TTL event_ts + INTERVAL 90 DAY DELETE;
+
+ALTER TABLE gold.fact_wazuh_events MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+ALTER TABLE gold.fact_suricata_events MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+ALTER TABLE gold.fact_zeek_events MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+
+ALTER TABLE gold.bridge_wazuh_event_tag MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+ALTER TABLE gold.bridge_suricata_event_tag MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+ALTER TABLE gold.bridge_zeek_event_tag MODIFY TTL event_ts + INTERVAL 365 DAY DELETE;
+"
+```
+
+Optional: force immediate TTL materialization on existing data (can be expensive):
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --multiquery --query "
+ALTER TABLE bronze.arkime_sessions3_26 MATERIALIZE TTL;
+ALTER TABLE bronze.suricata_events_raw MATERIALIZE TTL;
+ALTER TABLE bronze.wazuh_events_raw MATERIALIZE TTL;
+ALTER TABLE bronze.zeek_events_raw MATERIALIZE TTL;
+"
+```
+
+Record retention in metadata (for governance/UI):
+
+```sql
+UPDATE metadata.projects
+SET retention_days = 90, updated_at = now()
+WHERE project_id = 'acme';
+```
+
+Remove / take out retention policy:
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --multiquery --query "
+ALTER TABLE bronze.arkime_sessions3_26 REMOVE TTL;
+ALTER TABLE bronze.suricata_events_raw REMOVE TTL;
+ALTER TABLE bronze.wazuh_events_raw REMOVE TTL;
+ALTER TABLE bronze.zeek_events_raw REMOVE TTL;
+
+ALTER TABLE gold.fact_wazuh_events REMOVE TTL;
+ALTER TABLE gold.fact_suricata_events REMOVE TTL;
+ALTER TABLE gold.fact_zeek_events REMOVE TTL;
+
+ALTER TABLE gold.bridge_wazuh_event_tag REMOVE TTL;
+ALTER TABLE gold.bridge_suricata_event_tag REMOVE TTL;
+ALTER TABLE gold.bridge_zeek_event_tag REMOVE TTL;
+"
+```
+
+Important:
+- Removing TTL stops future retention deletes.
+- Data already deleted by previous TTL cannot be restored from ClickHouse alone.
 
 ### OpenSearch puller config
 Environment variables:
@@ -377,13 +520,30 @@ User flow (typical):
 1) Projects: create a project (ClickHouse uses `clickhouse_namespace` as `<clickhouse_namespace>_bronze` and `<clickhouse_namespace>_gold`).
 2) Puller: add OpenSearch sources, adjust polling config, and monitor ingestion health.
    (You can also use the Sources page for full source editing.)
-3) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
-4) Backfill: queue historical loads if needed.
-5) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
+3) File Export:
+   - Manual mode: select source + indices + format (`csv`, `parquet`, or `zip`) and export to SeaweedFS bucket/folder.
+   - Automation mode: create/update trigger-based schedules (interval + lookback window + folder prefix) from the same page.
+   - One index = one file.
+4) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
+5) Backfill: queue historical loads if needed.
+6) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.
 - Backfill throttling can be set per job in the UI (`throttle_seconds`).
+- File Export uses a fixed SeaweedFS bucket from `SEAWEED_S3_BUCKET`.
+- File Export validates bucket existence first; folder prefix is optional and can be a new path.
+- Automation jobs are executed by background service `itsec-file-export-worker`.
+- `zip` export contains a CSV payload.
+
+SeaweedFS env vars for `itsec-datapipeline-manager`:
+- `SEAWEED_S3_ENDPOINT` (default: `http://seaweedfs:8333`)
+- `SEAWEED_S3_REGION` (default: `us-east-1`)
+- `SEAWEED_S3_ACCESS_KEY` / `SEAWEED_S3_SECRET_KEY` (optional)
+- `SEAWEED_S3_BUCKET` (default: `itsec-test`)
+- `SEAWEED_S3_VERIFY_SSL` (default: `false`)
+- `ITSEC_FILE_EXPORT_BATCH_SIZE` (default: `1000`)
+- `ITSEC_FILE_EXPORT_AUTOMATION_POLL_SECONDS` (default: `30`, worker poll interval)
 
 ## Superset
 Log in at http://localhost:18089 with admin/admin.

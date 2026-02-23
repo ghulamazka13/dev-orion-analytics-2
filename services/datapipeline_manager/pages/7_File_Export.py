@@ -63,6 +63,49 @@ def _ensure_export_table() -> None:
     )
 
 
+def _ensure_automation_table() -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata.file_export_automations (
+          automation_id BIGSERIAL PRIMARY KEY,
+          automation_name TEXT NOT NULL UNIQUE,
+          source_id BIGINT NOT NULL,
+          source_name TEXT NOT NULL,
+          indices_json JSONB NOT NULL,
+          file_format TEXT NOT NULL,
+          bucket_name TEXT NOT NULL,
+          folder_prefix TEXT,
+          interval_minutes INTEGER NOT NULL,
+          lookback_minutes INTEGER NOT NULL,
+          enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          requested_by TEXT,
+          next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_run_started_at TIMESTAMPTZ,
+          last_run_finished_at TIMESTAMPTZ,
+          last_status TEXT NOT NULL DEFAULT 'never',
+          last_error TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT file_export_automations_source_fk
+            FOREIGN KEY (source_id)
+            REFERENCES metadata.opensearch_sources (source_id)
+            ON UPDATE CASCADE
+            ON DELETE CASCADE,
+          CONSTRAINT file_export_automations_interval_ck
+            CHECK (interval_minutes > 0),
+          CONSTRAINT file_export_automations_lookback_ck
+            CHECK (lookback_minutes > 0)
+        );
+        """
+    )
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_file_export_automations_due
+          ON metadata.file_export_automations (enabled, next_run_at);
+        """
+    )
+
+
 def _safe_json_load(value: Any) -> Dict[str, Any]:
     if value is None:
         return {}
@@ -306,6 +349,116 @@ def _human_size(value: Optional[int]) -> str:
     return f"{size:.2f} {unit}"
 
 
+def _normalize_indices(value: Any) -> List[str]:
+    parsed = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    normalized: List[str] = []
+    for item in parsed:
+        token = str(item).strip()
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
+def _upsert_automation(
+    automation_name: str,
+    source: Dict[str, Any],
+    indices: List[str],
+    file_format: str,
+    bucket_name: str,
+    folder_prefix: str,
+    interval_minutes: int,
+    lookback_minutes: int,
+    enabled: bool,
+    requested_by: str,
+) -> int:
+    row = db.fetch_one(
+        """
+        INSERT INTO metadata.file_export_automations (
+          automation_name, source_id, source_name, indices_json, file_format,
+          bucket_name, folder_prefix, interval_minutes, lookback_minutes, enabled,
+          requested_by, next_run_at, last_status, last_error, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, now(), 'pending', NULL, now(), now())
+        ON CONFLICT (automation_name) DO UPDATE SET
+          source_id = EXCLUDED.source_id,
+          source_name = EXCLUDED.source_name,
+          indices_json = EXCLUDED.indices_json,
+          file_format = EXCLUDED.file_format,
+          bucket_name = EXCLUDED.bucket_name,
+          folder_prefix = EXCLUDED.folder_prefix,
+          interval_minutes = EXCLUDED.interval_minutes,
+          lookback_minutes = EXCLUDED.lookback_minutes,
+          enabled = EXCLUDED.enabled,
+          requested_by = EXCLUDED.requested_by,
+          next_run_at = now(),
+          last_status = 'pending',
+          last_error = NULL,
+          updated_at = now()
+        RETURNING automation_id
+        """,
+        (
+            automation_name,
+            source["source_id"],
+            source["name"],
+            json.dumps(indices),
+            file_format,
+            bucket_name,
+            folder_prefix,
+            int(interval_minutes),
+            int(lookback_minutes),
+            bool(enabled),
+            requested_by,
+        ),
+    )
+    return int(row["automation_id"])
+
+
+def _set_automation_enabled(automation_id: int, enabled: bool) -> None:
+    db.execute(
+        """
+        UPDATE metadata.file_export_automations
+        SET enabled = %s,
+            next_run_at = CASE WHEN %s THEN now() ELSE next_run_at END,
+            updated_at = now()
+        WHERE automation_id = %s
+        """,
+        (enabled, enabled, automation_id),
+    )
+
+
+def _trigger_automation_now(automation_id: int) -> None:
+    db.execute(
+        """
+        UPDATE metadata.file_export_automations
+        SET enabled = TRUE,
+            next_run_at = now(),
+            updated_at = now()
+        WHERE automation_id = %s
+        """,
+        (automation_id,),
+    )
+
+
+def _delete_automation(automation_id: int) -> None:
+    db.execute(
+        """
+        DELETE FROM metadata.file_export_automations
+        WHERE automation_id = %s
+        """,
+        (automation_id,),
+    )
+
+
 def _insert_job(
     source: Dict[str, Any],
     index_name: str,
@@ -382,6 +535,7 @@ def _set_job_failed(job_id: int, last_error: str) -> None:
 
 
 _ensure_export_table()
+_ensure_automation_table()
 
 sources = db.fetch_all(
     """
@@ -563,6 +717,190 @@ if submitted:
         else:
             st.warning(f"Export finished with partial failures. Success: {total_ok}, Failed: {total_failed}.")
         st.rerun()
+
+st.markdown("### Export Automation")
+st.caption("Set trigger-based export schedules. Worker will execute due automations in the background.")
+
+with st.form("file_export_automation_form"):
+    automation_name = st.text_input(
+        "Automation Name",
+        value="",
+        help="Unique name. Saving with an existing name updates the automation.",
+    )
+    if loaded_indices:
+        automation_indices = st.multiselect(
+            "Indices to export automatically",
+            options=loaded_indices,
+            default=loaded_indices,
+            key="file_export_auto_indices",
+        )
+    else:
+        st.info("Load matched indices first to define automation targets.")
+        automation_indices = []
+
+    col_auto_a, col_auto_b = st.columns(2)
+    with col_auto_a:
+        automation_format = st.selectbox(
+            "Automation File Format",
+            options=["csv", "parquet", "zip"],
+            index=0,
+            key="file_export_auto_format",
+        )
+        automation_interval = st.number_input(
+            "Trigger Every (minutes)",
+            min_value=1,
+            max_value=10080,
+            value=60,
+            step=1,
+            key="file_export_auto_interval",
+        )
+    with col_auto_b:
+        automation_lookback = st.number_input(
+            "Lookback Window (minutes)",
+            min_value=1,
+            max_value=10080,
+            value=60,
+            step=1,
+            key="file_export_auto_lookback",
+        )
+        automation_enabled = st.checkbox(
+            "Enabled",
+            value=True,
+            key="file_export_auto_enabled",
+        )
+
+    automation_folder_prefix = st.text_input(
+        "Automation Folder Prefix",
+        value="",
+        help="Optional. Example: exports/hourly/",
+        key="file_export_auto_prefix",
+    )
+    automation_requested_by = st.text_input(
+        "Automation Requested By",
+        value=str(st.session_state.get("username") or "admin"),
+        key="file_export_auto_requested_by",
+    )
+    save_automation = st.form_submit_button("Save Automation")
+
+if save_automation:
+    if not selected_source:
+        st.error("Source is required.")
+    elif not automation_name.strip():
+        st.error("Automation name is required.")
+    elif not automation_indices:
+        st.error("Select at least one index for automation.")
+    else:
+        try:
+            client = seaweed.s3_client()
+            normalized_auto_prefix = seaweed.normalize_prefix(automation_folder_prefix)
+            if not seaweed.bucket_exists(client, configured_bucket):
+                st.error(f"Configured bucket '{configured_bucket}' doesn't exist.")
+                st.stop()
+
+            automation_id = _upsert_automation(
+                automation_name.strip(),
+                selected_source,
+                automation_indices,
+                automation_format,
+                configured_bucket,
+                normalized_auto_prefix,
+                int(automation_interval),
+                int(automation_lookback),
+                bool(automation_enabled),
+                automation_requested_by.strip() or "admin",
+            )
+            ui.notify(
+                f"Automation saved (id={automation_id}). Trigger updated and queued for next run.",
+                "success",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Failed to save automation: {exc}")
+
+automations = db.fetch_all(
+    """
+    SELECT automation_id, automation_name, source_id, source_name, indices_json, file_format,
+           bucket_name, folder_prefix, interval_minutes, lookback_minutes, enabled, requested_by,
+           next_run_at, last_run_started_at, last_run_finished_at, last_status, last_error,
+           created_at, updated_at
+    FROM metadata.file_export_automations
+    ORDER BY created_at DESC
+    LIMIT 300
+    """
+)
+
+if automations:
+    automation_view = pd.DataFrame(automations)
+    if not automation_view.empty:
+        automation_view["indices_count"] = automation_view["indices_json"].apply(
+            lambda value: len(_normalize_indices(value))
+        )
+    display_columns = [
+        "automation_id",
+        "automation_name",
+        "source_name",
+        "enabled",
+        "file_format",
+        "bucket_name",
+        "folder_prefix",
+        "interval_minutes",
+        "lookback_minutes",
+        "indices_count",
+        "next_run_at",
+        "last_status",
+        "last_run_finished_at",
+        "last_error",
+    ]
+    st.dataframe(
+        automation_view[[col for col in display_columns if col in automation_view.columns]],
+        use_container_width=True,
+    )
+
+    automation_options = [
+        (
+            str(row["automation_id"]),
+            f"{row['automation_name']} (id={row['automation_id']}, source={row['source_name']})",
+        )
+        for row in automations
+    ]
+    selected_automation_label = st.selectbox(
+        "Manage Automation",
+        options=[label for _, label in automation_options],
+        key="file_export_manage_automation",
+    )
+    selected_automation_id = next(
+        (automation_id for automation_id, label in automation_options if label == selected_automation_label),
+        None,
+    )
+    selected_automation = next(
+        (row for row in automations if str(row["automation_id"]) == str(selected_automation_id)),
+        None,
+    )
+
+    manage_col_a, manage_col_b, manage_col_c = st.columns(3)
+    if selected_automation and manage_col_a.button("Run Now", key="file_export_auto_run_now"):
+        _trigger_automation_now(int(selected_automation["automation_id"]))
+        ui.notify("Automation queued to run immediately.", "success")
+        st.rerun()
+
+    if selected_automation:
+        toggle_label = "Disable" if selected_automation.get("enabled") else "Enable"
+        if manage_col_b.button(toggle_label, key="file_export_auto_toggle_enabled"):
+            _set_automation_enabled(
+                int(selected_automation["automation_id"]),
+                not bool(selected_automation.get("enabled")),
+            )
+            ui.notify("Automation status updated.", "success")
+            st.rerun()
+
+        if manage_col_c.button("Delete", key="file_export_auto_delete"):
+            _delete_automation(int(selected_automation["automation_id"]))
+            ui.notify("Automation deleted.", "success")
+            st.rerun()
+else:
+    st.info("No automations yet. Create one with the form above.")
 
 st.markdown("### Export History")
 status_filter = st.selectbox(

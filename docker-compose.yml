@@ -248,11 +248,37 @@ services:
       - ITSEC_SECRET_KEY=${ITSEC_SECRET_KEY:-}
       - ITSEC_PAGE_SIZE=20
       - ITSEC_FILE_EXPORT_BATCH_SIZE=${ITSEC_FILE_EXPORT_BATCH_SIZE:-1000}
+      - ITSEC_FILE_EXPORT_AUTOMATION_POLL_SECONDS=${ITSEC_FILE_EXPORT_AUTOMATION_POLL_SECONDS:-30}
     volumes:
       - ./secrets:/run/secrets:ro
     depends_on:
       - postgres
       - clickhouse
+    restart: unless-stopped
+
+  itsec-file-export-worker:
+    build:
+      context: .
+      dockerfile: services/datapipeline_manager/Dockerfile
+    command: ["python", "/app/file_export_worker.py"]
+    environment:
+      - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
+      - OPENSEARCH_VERIFY_SSL=true
+      - SEAWEED_S3_ENDPOINT=${SEAWEED_S3_ENDPOINT:-http://seaweedfs:8333}
+      - SEAWEED_S3_REGION=${SEAWEED_S3_REGION:-us-east-1}
+      - SEAWEED_S3_ACCESS_KEY=${SEAWEED_S3_ACCESS_KEY:-}
+      - SEAWEED_S3_SECRET_KEY=${SEAWEED_S3_SECRET_KEY:-}
+      - SEAWEED_S3_BUCKET=${SEAWEED_S3_BUCKET:-itsec-test}
+      - SEAWEED_S3_VERIFY_SSL=${SEAWEED_S3_VERIFY_SSL:-false}
+      - ITSEC_UI_PASSWORD=${ITSEC_UI_PASSWORD:-admin123!}
+      - ITSEC_SECRET_KEY=${ITSEC_SECRET_KEY:-}
+      - ITSEC_FILE_EXPORT_BATCH_SIZE=${ITSEC_FILE_EXPORT_BATCH_SIZE:-1000}
+      - ITSEC_FILE_EXPORT_AUTOMATION_POLL_SECONDS=${ITSEC_FILE_EXPORT_AUTOMATION_POLL_SECONDS:-30}
+    volumes:
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      - postgres
+      - seaweedfs
     restart: unless-stopped
 
   schema-migrator:
