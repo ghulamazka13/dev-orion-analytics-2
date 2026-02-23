@@ -234,16 +234,16 @@ services:
     ports:
       - "18090:8081"
     env_file:
-      - secrets/seaweed.env
+      - ./secrets/seaweed.env
     environment:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
       - OPENSEARCH_VERIFY_SSL=true
       - SEAWEED_S3_ENDPOINT=${SEAWEED_S3_ENDPOINT:-http://seaweedfs:8333}
       - SEAWEED_S3_REGION=${SEAWEED_S3_REGION:-us-east-1}
-      - SEAWEED_S3_ACCESS_KEY=${SEAWEED_S3_ACCESS_KEY:-}
-      - SEAWEED_S3_SECRET_KEY=${SEAWEED_S3_SECRET_KEY:-}
-      - SEAWEED_S3_BUCKET=${SEAWEED_S3_BUCKET:-itsec-test}
+      #- SEAWEED_S3_ACCESS_KEY=${SEAWEED_S3_ACCESS_KEY:-}
+      #- SEAWEED_S3_SECRET_KEY=${SEAWEED_S3_SECRET_KEY:-}
+      #- SEAWEED_S3_BUCKET=${SEAWEED_S3_BUCKET:-itsec-test}
       - SEAWEED_S3_VERIFY_SSL=${SEAWEED_S3_VERIFY_SSL:-false}
       - ITSEC_UI_USER=admin
       - ITSEC_UI_PASSWORD=admin123!
