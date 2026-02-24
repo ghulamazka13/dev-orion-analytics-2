@@ -550,18 +550,67 @@ Docker service: `itsec-datapipeline-manager`
 Upgrade tip: if you previously ran the old Source Manager container, use:
 `docker compose up -d --build --remove-orphans`
 
-User flow (typical):
-1) Projects: create a project (ClickHouse uses `clickhouse_namespace` as `<clickhouse_namespace>_bronze` and `<clickhouse_namespace>_gold`).
-2) Puller: add OpenSearch sources, adjust polling config, and monitor ingestion health.
-   (You can also use the Sources page for full source editing.)
-3) File Export:
-   - Manual mode: select source + indices + format (`csv`, `parquet`, or `zip`) and export to SeaweedFS bucket/folder.
-   - Automation mode: create/update trigger-based schedules (interval + lookback window + folder prefix) from the same page.
-   - One index = one file.
-4) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
-5) Backfill: queue historical loads if needed.
-6) Gold Pipelines: manage DAG metadata + pipeline SQL (`sql_text`) directly from Postgres.
-7) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
+Recommended execution order (source to gold):
+1) Projects: create a project (`clickhouse_namespace` maps to `<namespace>_bronze` and `<namespace>_gold`).
+2) Sources: create the OpenSearch source (base URL, auth, `index_pattern`, `time_field`).
+   Optional: set `Exclude Index Patterns` (comma/newline separated, wildcard supported), e.g. `*-new-shrunk*`.
+3) Puller > Source Routing: map the source to a target ClickHouse dataset/table.
+4) Sources/Puller: run Test Connection and verify the matched index list is correct.
+5) Field Registry: define derived fields (ALIAS or MATERIALIZED), then click "Apply Schema Changes".
+6) Puller: run incremental ingestion so data lands in bronze.
+7) Backfill: run only when you need historical windows outside incremental overlap.
+8) Gold Pipelines: run/monitor gold DAGs after bronze has data.
+9) Monitoring: verify ingestion lag, task health, and errors.
+
+Table/column order clarification:
+- You do **not** need to manually create the target table in most cases.
+- The puller will auto-create the mapped target raw table (`target_dataset.target_table_name`) if the database already exists.
+- The target database (`target_dataset`) must already exist before puller runs.
+- For the default path (`os_events_raw`), run schema setup/migrator first so project databases and base storage are ready.
+- If you use Field Registry on a custom table, ensure the table exists first (run puller once, or create it manually), then click `Apply Schema Changes`.
+
+File Export (optional):
+- Manual mode: select source + indices + format (`csv`, `parquet`, or `zip`) and export to SeaweedFS bucket/folder.
+- Automation mode: create/update trigger-based schedules (interval + lookback window + folder prefix).
+- One index = one file.
+
+Field Registry menu (field-by-field):
+- `Project Scope`:
+  - `global` = apply to all enabled projects.
+  - Specific project id = apply only to that project.
+- `Dataset`:
+  - Logical label for organization (for example `generic`, `suricata`, `wazuh`, `zeek`).
+  - In the current `field_registry` flow, this value is metadata and does not change target DB/table resolution.
+- `Layer`:
+  - `bronze` -> target DB `<clickhouse_namespace>_bronze`.
+  - `gold_fact` / `gold_dim` -> target DB `<clickhouse_namespace>_gold`.
+- `Table Name`:
+  - Usually plain table name (example: `os_events_raw`, `suricata_events_raw`, `fact_suricata_events`).
+  - You can also use `db.table` to force a fully qualified target table.
+  - Allowed characters are alphanumeric + underscore.
+- `Column Name`:
+  - New column to add.
+  - Allowed characters are alphanumeric + underscore.
+- `Column Type`:
+  - ClickHouse type definition (example: `Nullable(String)`, `UInt64`, `DateTime64(3, 'Asia/Jakarta')`).
+- `Mode`:
+  - `ALIAS`: virtual/computed column (not physically stored).
+  - `MATERIALIZED`: computed and stored at write time.
+- `Expression SQL`:
+  - ClickHouse expression for derived value.
+  - Example: `JSONExtractString(raw, 'field')`.
+  - If left empty, the system adds a regular column without computed expression.
+- `Enabled`:
+  - Only enabled entries are applied during schema migration.
+
+Registered Fields section:
+- `Filter by project/layer/status` only filters what you see in the table.
+- `Enable/Disable` toggles whether an entry will be applied.
+- `Delete Field` removes metadata entry (it does not automatically drop the existing ClickHouse column).
+
+`Apply Schema Changes`:
+- Executes idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` from enabled registry entries.
+- Safe to run repeatedly; existing columns are skipped.
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.

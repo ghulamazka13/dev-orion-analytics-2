@@ -280,6 +280,30 @@ SELECT DISTINCT
     JSON_VALUE(raw, '$.zeek.dns.query'),
     JSON_VALUE(raw, '$.zeek.ssl.server_name')
   ) AS domain,
+  JSON_VALUE(raw, '$.zeek.dns.qclass_name') AS dns_qclass_name,
+  JSON_VALUE(raw, '$.zeek.dns.qtype_name') AS dns_qtype_name,
+  ifNull(
+    JSONExtract(raw, 'zeek', 'dns', 'answers', 'Array(String)'),
+    []
+  ) AS dns_answers,
+  ifNull(
+    JSONExtract(raw, 'zeek', 'dns', 'TTLs', 'Array(Int64)'),
+    []
+  ) AS dns_ttls,
+  multiIf(
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.dns.rejected'), '')) = 'true',
+    toUInt8(1),
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.dns.rejected'), '')) = 'false',
+    toUInt8(0),
+    toUInt8OrNull(JSON_VALUE(raw, '$.zeek.dns.rejected'))
+  ) AS dns_rejected,
+  multiIf(
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.dns.auth'), '')) = 'true',
+    toUInt8(1),
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.dns.auth'), '')) = 'false',
+    toUInt8(0),
+    toUInt8OrNull(JSON_VALUE(raw, '$.zeek.dns.auth'))
+  ) AS dns_auth,
   coalesce(
     JSONExtractString(raw, 'message'),
     JSON_VALUE(raw, '$.event.original'),

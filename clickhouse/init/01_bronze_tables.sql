@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
   vlan_id Nullable(String),
   tags Array(String),
   domain Nullable(String),
+  dns_qclass_name Nullable(String),
+  dns_qtype_name Nullable(String),
+  dns_answers Array(String),
+  dns_ttls Array(Int64),
+  dns_rejected Nullable(UInt8),
+  dns_auth Nullable(UInt8),
   message Nullable(String),
   raw_data String
 )
