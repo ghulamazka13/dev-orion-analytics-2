@@ -41,8 +41,13 @@ def _build_payload(dag_cfg: Dict[str, Any]) -> Dict[str, Any]:
         entry: Dict[str, Any] = {
             "pipeline_id": pipeline.get("pipeline_id"),
             "enabled": bool(pipeline.get("enabled", True)),
-            "sql_path": pipeline.get("sql_path"),
         }
+        sql_path = pipeline.get("sql_path")
+        if sql_path:
+            entry["sql_path"] = str(sql_path)
+        sql_text = pipeline.get("sql_text")
+        if sql_text:
+            entry["sql_text"] = str(sql_text)
         if pipeline.get("window_minutes") is not None:
             entry["window_minutes"] = int(pipeline.get("window_minutes"))
         depends_on = pipeline.get("depends_on") or []

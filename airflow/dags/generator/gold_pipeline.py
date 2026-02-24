@@ -54,6 +54,13 @@ def _load_sql(path: str) -> str:
         return handle.read()
 
 
+def _normalize_sql_text(sql_text: Optional[str]) -> Optional[str]:
+    if sql_text is None:
+        return None
+    normalized = str(sql_text).strip()
+    return normalized or None
+
+
 def _render_sql(sql_text: str, context: Dict[str, Any]) -> str:
     return Template(sql_text).render(**context)
 
@@ -174,7 +181,8 @@ def run_pipeline(pipeline: Dict[str, Any], default_window_minutes: int, **contex
         return
 
     start_ts, end_ts = _get_window(context, pipeline.get("window_minutes", default_window_minutes))
-    sql_path = pipeline["sql_path"]
+    sql_text = _normalize_sql_text(pipeline.get("sql_text"))
+    sql_path = pipeline.get("sql_path")
     params = pipeline.get("params") or {}
     target_table = params.get("target_table") or pipeline.get("target_table")
     source_tables = _normalize_list(params.get("source_tables") or params.get("source_table"))
@@ -187,7 +195,15 @@ def run_pipeline(pipeline: Dict[str, Any], default_window_minutes: int, **contex
         "pipeline_id": pipeline_id,
     }
 
-    sql_text = _load_sql(sql_path)
+    if sql_text:
+        sql_source = "metadata.sql_text"
+    elif sql_path:
+        sql_text = _load_sql(sql_path)
+        sql_source = sql_path
+    else:
+        logging.warning("Pipeline %s missing sql_text and sql_path", pipeline_id)
+        return
+
     sql_text = _render_sql(sql_text, render_context)
     statements = _split_statements(sql_text)
     if not statements:
@@ -200,7 +216,7 @@ def run_pipeline(pipeline: Dict[str, Any], default_window_minutes: int, **contex
         len(statements),
         start_ts,
         end_ts,
-        sql_path,
+        sql_source,
         target_table or "-",
         sorted(params.keys()),
     )
@@ -340,13 +356,33 @@ class GoldPipelineGenerator:
             FROM metadata.gold_dags
             """
         )
-        pipeline_sql = text(
+        pipeline_sql_with_sql_text = text(
             """
             SELECT
               d.dag_name,
               p.pipeline_name,
               p.enabled,
               p.sql_path,
+              p.sql_text,
+              p.window_minutes,
+              p.depends_on,
+              p.target_table,
+              p.params,
+              p.pipeline_order
+            FROM metadata.gold_pipelines p
+            JOIN metadata.gold_dags d
+              ON d.id = p.dag_id
+            ORDER BY d.id, p.pipeline_order, p.pipeline_name
+            """
+        )
+        pipeline_sql_legacy = text(
+            """
+            SELECT
+              d.dag_name,
+              p.pipeline_name,
+              p.enabled,
+              p.sql_path,
+              NULL::text AS sql_text,
               p.window_minutes,
               p.depends_on,
               p.target_table,
@@ -363,7 +399,18 @@ class GoldPipelineGenerator:
         try:
             with engine.begin() as conn:
                 dag_rows = conn.execute(dag_sql).mappings().all()
-                pipeline_rows = conn.execute(pipeline_sql).mappings().all()
+                try:
+                    pipeline_rows = conn.execute(
+                        pipeline_sql_with_sql_text
+                    ).mappings().all()
+                except Exception as exc:
+                    logging.info(
+                        "gold_pipelines.sql_text unavailable, falling back to legacy schema: %s",
+                        exc,
+                    )
+                    pipeline_rows = conn.execute(
+                        pipeline_sql_legacy
+                    ).mappings().all()
         except Exception as exc:
             logging.warning("Failed to load gold metadata from Postgres: %s", exc)
             return []
@@ -410,6 +457,7 @@ class GoldPipelineGenerator:
                 "pipeline_id": pipeline_name,
                 "enabled": row.get("enabled", True),
                 "sql_path": row.get("sql_path"),
+                "sql_text": _normalize_sql_text(row.get("sql_text")),
                 "depends_on": _normalize_list(row.get("depends_on")),
                 "params": params,
                 "pipeline_order": row.get("pipeline_order", 0),
@@ -486,11 +534,18 @@ class GoldPipelineGenerator:
                 pipeline_id = pipeline.get("pipeline_id")
                 if not pipeline_id:
                     continue
+                sql_text = _normalize_sql_text(pipeline.get("sql_text"))
                 sql_path = pipeline.get("sql_path")
-                if not sql_path:
-                    logging.warning("Missing sql_path for pipeline %s", pipeline_id)
+                if not sql_text and not sql_path:
+                    logging.warning(
+                        "Missing sql_text/sql_path for pipeline %s",
+                        pipeline_id,
+                    )
                     continue
-                pipeline["sql_path"] = _resolve_sql_path(base_dir, sql_path)
+                if sql_text:
+                    pipeline["sql_text"] = sql_text
+                elif sql_path:
+                    pipeline["sql_path"] = _resolve_sql_path(base_dir, sql_path)
                 task_map[pipeline_id] = PythonOperator(
                     task_id=pipeline_id,
                     python_callable=run_pipeline,

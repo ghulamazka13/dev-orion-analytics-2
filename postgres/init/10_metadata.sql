@@ -18,13 +18,19 @@ CREATE TABLE IF NOT EXISTS metadata.gold_pipelines (
   dag_id BIGINT NOT NULL,
   pipeline_name TEXT NOT NULL,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
-  sql_path TEXT NOT NULL,
+  sql_path TEXT,
+  sql_text TEXT,
   window_minutes INTEGER,
   depends_on TEXT[],
   target_table TEXT NOT NULL,
   params JSONB NOT NULL DEFAULT '{}'::jsonb,
   pipeline_order INTEGER NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT gold_pipelines_sql_source_ck
+    CHECK (
+      NULLIF(btrim(sql_path), '') IS NOT NULL
+      OR NULLIF(btrim(sql_text), '') IS NOT NULL
+    ),
   UNIQUE (dag_id, pipeline_name),
   CONSTRAINT gold_pipelines_dag_fk
     FOREIGN KEY (dag_id)

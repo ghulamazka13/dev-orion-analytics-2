@@ -16,7 +16,7 @@ This repo is an end-to-end near real-time security analytics POC for Wazuh, Suri
 ## Dataflow
 - OpenSearch index -> OpenSearch Puller -> `<clickhouse_namespace>_bronze.os_events_raw`
 - Schema Migrator + Bronze Tables metadata -> project bronze parsed tables
-- Airflow executes SQL templates in `airflow/dags/sql` based on Postgres metadata
+- Airflow executes SQL from Postgres metadata (`metadata.gold_pipelines.sql_text`) with fallback to file path (`sql_path`)
 - Gold star schema (dims, facts, bridges) in `gold.*`
 - Superset and CHouse UI query gold
 
@@ -32,6 +32,12 @@ See `FACT_DIM_ARCHITECTURE.md` for the star schema design.
 
 ```bash
 docker compose up -d
+```
+
+If dependencies changed in `requirements.txt`, rebuild images so Docker installs the new libs automatically:
+
+```bash
+docker compose up -d --build
 ```
 
 2) Wait for services2
@@ -100,7 +106,7 @@ Roles/users are defined in `clickhouse/init/00_databases.sql`.
 - DAG: `gold_star_schema` (generated at runtime)
 - Metadata source-of-truth: Postgres tables `metadata.gold_dags` + `metadata.gold_pipelines`
 - Metadata updater DAG: `metadata_updater` (exports a YAML snapshot to `airflow/dags/gold_pipelines.yml`)
-- SQL templates: `airflow/dags/sql/*.sql` (one pipeline per file)
+- SQL source: prefer `metadata.gold_pipelines.sql_text`; fallback to `sql_path`
 - Default window: 10 minutes (override with `dag_run.conf` `start_ts`/`end_ts` or `window_minutes`)
 - Bronze and gold timestamps are stored in `Asia/Jakarta` (UTC+7)
 
@@ -112,8 +118,10 @@ Config switches:
 To add a new gold pipeline (existing DAG):
 1) Get the DAG numeric id:
    `SELECT id FROM metadata.gold_dags WHERE dag_name = 'gold_star_schema';`
-2) Insert a row in `metadata.gold_pipelines` with `dag_id`, `pipeline_name`, `sql_path`, and `target_table`
-3) Create the SQL template under `airflow/dags/sql/` using `{{ start_ts }}`, `{{ end_ts }}`, and `{{ params.* }}`
+2) Insert a row in `metadata.gold_pipelines` with `dag_id`, `pipeline_name`, `target_table`, and one of:
+   - `sql_text` (recommended), or
+   - `sql_path` (legacy file-based mode)
+3) SQL templates can use `{{ start_ts }}`, `{{ end_ts }}`, and `{{ params.* }}`
 4) Trigger `metadata_updater` (optional) to regenerate the YAML snapshot
 
 To add a new DAG + pipelines (new data source):
@@ -143,7 +151,7 @@ ON CONFLICT (dag_name) DO NOTHING;
 2) Get the numeric id for the new DAG:
    `SELECT id FROM metadata.gold_dags WHERE dag_name = 'gold_new_source';`
 3) Insert pipeline rows in `metadata.gold_pipelines` using that `dag_id` (set `depends_on` with pipeline_name values).
-4) Add SQL templates under `airflow/dags/sql/`.
+4) Add SQL in `sql_text` (recommended) or keep legacy `sql_path`.
 5) Wait for the DAG parser to refresh or trigger `metadata_updater` (optional).
 
 Example backfill run:
@@ -163,11 +171,31 @@ docker compose exec -T airflow-webserver airflow dags trigger gold_star_schema \
 ## Metadata store (Postgres)
 Metadata schema and seed data live in `postgres/init/10_metadata.sql`.
 `metadata.gold_pipelines.dag_id` is a numeric FK to `metadata.gold_dags.id`.
+`metadata.gold_pipelines` supports SQL-in-DB via column `sql_text`.
 
 If the Postgres volume already exists, apply the SQL manually:
 
 ```bash
 docker compose exec -T postgres psql -U airflow -d airflow -f /docker-entrypoint-initdb.d/10_metadata.sql
+docker compose exec -T postgres psql -U airflow -d airflow -f /docker-entrypoint-initdb.d/12_gold_sql_text.sql
+```
+
+Migrate existing `airflow/dags/sql/*.sql` into Postgres metadata:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Then run:
+
+```bash
+python3 scripts/sync_gold_sql_to_metadata.py --dsn "postgresql://airflow:airflow@localhost:15432/airflow"
+```
+
+Optional (if you want to remove file dependency completely):
+
+```bash
+python3 scripts/sync_gold_sql_to_metadata.py --dsn "postgresql://airflow:airflow@localhost:15432/airflow" --clear-sql-path
 ```
 
 Example insert for a new pipeline:
@@ -182,7 +210,7 @@ INSERT INTO metadata.gold_pipelines (
   dag_id,
   pipeline_name,
   enabled,
-  sql_path,
+  sql_text,
   window_minutes,
   depends_on,
   target_table,
@@ -192,7 +220,7 @@ SELECT
   dag.id,
   'fact_new_events',
   TRUE,
-  'sql/fact_new_events.sql',
+  'INSERT INTO gold.fact_new_events SELECT ...',
   10,
   ARRAY['dim_date', 'dim_time'],
   'gold.fact_new_events',
@@ -526,7 +554,8 @@ User flow (typical):
    - One index = one file.
 4) Field Registry: add derived fields (ALIAS or MATERIALIZED) and click "Apply Schema Changes".
 5) Backfill: queue historical loads if needed.
-6) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
+6) Gold Pipelines: manage DAG metadata + pipeline SQL (`sql_text`) directly from Postgres.
+7) Monitoring: verify ingestion status, lag, and errors (Puller/Monitoring pages).
 
 Notes:
 - Schema changes and metadata updates are idempotent and require no service restarts.

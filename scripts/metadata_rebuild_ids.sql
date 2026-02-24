@@ -86,6 +86,7 @@ END $$;
 ALTER TABLE metadata.gold_pipelines DROP CONSTRAINT IF EXISTS gold_pipelines_new_dag_fk;
 ALTER TABLE metadata.gold_pipelines DROP CONSTRAINT IF EXISTS gold_pipelines_new_dag_pipeline_key;
 ALTER TABLE metadata.gold_pipelines DROP CONSTRAINT IF EXISTS gold_pipelines_new_pk;
+ALTER TABLE metadata.gold_pipelines DROP CONSTRAINT IF EXISTS gold_pipelines_sql_source_ck;
 ALTER TABLE metadata.gold_dags DROP CONSTRAINT IF EXISTS gold_dags_new_dag_id_key;
 ALTER TABLE metadata.gold_dags DROP CONSTRAINT IF EXISTS gold_dags_new_id_dag_id_key;
 ALTER TABLE metadata.gold_dags DROP CONSTRAINT IF EXISTS gold_dags_new_pk;
@@ -100,6 +101,10 @@ ALTER TABLE metadata.gold_dags
   ADD COLUMN IF NOT EXISTS id BIGINT;
 ALTER TABLE metadata.gold_pipelines
   ADD COLUMN IF NOT EXISTS id BIGINT;
+ALTER TABLE metadata.gold_pipelines
+  ADD COLUMN IF NOT EXISTS sql_text TEXT;
+ALTER TABLE metadata.gold_pipelines
+  ALTER COLUMN sql_path DROP NOT NULL;
 
 WITH ordered AS (
   SELECT dag_name, row_number() OVER (ORDER BY dag_name) AS rn
@@ -170,13 +175,19 @@ CREATE TABLE metadata.gold_pipelines_new (
   dag_id BIGINT NOT NULL,
   pipeline_name TEXT NOT NULL,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
-  sql_path TEXT NOT NULL,
+  sql_path TEXT,
+  sql_text TEXT,
   window_minutes INTEGER,
   depends_on TEXT[],
   target_table TEXT NOT NULL,
   params JSONB NOT NULL DEFAULT '{}'::jsonb,
   pipeline_order INTEGER NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT gold_pipelines_sql_source_ck
+    CHECK (
+      NULLIF(btrim(sql_path), '') IS NOT NULL
+      OR NULLIF(btrim(sql_text), '') IS NOT NULL
+    ),
   CONSTRAINT gold_pipelines_pk PRIMARY KEY (id),
   CONSTRAINT gold_pipelines_dag_pipeline_key UNIQUE (dag_id, pipeline_name),
   CONSTRAINT gold_pipelines_dag_fk
@@ -192,6 +203,7 @@ INSERT INTO metadata.gold_pipelines_new (
   pipeline_name,
   enabled,
   sql_path,
+  sql_text,
   window_minutes,
   depends_on,
   target_table,
@@ -205,6 +217,7 @@ SELECT
   pipeline_name,
   enabled,
   sql_path,
+  sql_text,
   window_minutes,
   depends_on,
   target_table,

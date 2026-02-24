@@ -208,8 +208,8 @@ services:
 
   opensearch-puller:
     build:
-      context: ./services/opensearch_puller
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/opensearch_puller/Dockerfile
     environment:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
@@ -285,8 +285,8 @@ services:
 
   schema-migrator:
     build:
-      context: ./services/schema_migrator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/schema_migrator/Dockerfile
     environment:
       - POSTGRES_DSN=postgresql://airflow:airflow@postgres:5432/airflow
       - CLICKHOUSE_HTTP_URL=http://admin:admin@clickhouse:8123
