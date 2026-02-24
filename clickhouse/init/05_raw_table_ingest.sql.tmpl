@@ -296,6 +296,28 @@ SELECT DISTINCT
     toUInt8(0),
     toUInt8OrNull(JSON_VALUE(raw, '$.zeek.dns.auth'))
   ) AS dns_auth,
+  JSON_VALUE(raw, '$.zeek.http.method') AS http_method,
+  coalesce(
+    JSON_VALUE(raw, '$.zeek.http.uri'),
+    JSON_VALUE(raw, '$.url.full')
+  ) AS http_uri,
+  JSON_VALUE(raw, '$.zeek.http.referrer') AS http_referrer,
+  coalesce(
+    JSON_VALUE(raw, '$.zeek.http.user_agent'),
+    JSON_VALUE(raw, '$.user_agent.original')
+  ) AS http_user_agent,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.http.request_body_len')),
+    toInt64OrNull(JSON_VALUE(raw, '$.http.request.body.bytes'))
+  ) AS http_request_body_len,
+  coalesce(
+    toInt64OrNull(JSON_VALUE(raw, '$.zeek.http.response_body_len')),
+    toInt64OrNull(JSON_VALUE(raw, '$.http.response.body.bytes'))
+  ) AS http_response_body_len,
+  coalesce(
+    toInt32OrNull(JSON_VALUE(raw, '$.zeek.http.status_code')),
+    toInt32OrNull(JSON_VALUE(raw, '$.http.response.status_code'))
+  ) AS http_status_code,
   coalesce(
     JSONExtractString(raw, 'message'),
     JSON_VALUE(raw, '$.event.original'),

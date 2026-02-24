@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS bronze.zeek_events_raw (
   dns_ttls Array(Int64),
   dns_rejected Nullable(UInt8),
   dns_auth Nullable(UInt8),
+  http_method Nullable(String),
+  http_uri Nullable(String),
+  http_referrer Nullable(String),
+  http_user_agent Nullable(String),
+  http_request_body_len Nullable(Int64),
+  http_response_body_len Nullable(Int64),
+  http_status_code Nullable(Int32),
   message Nullable(String),
   raw_data String
 )
