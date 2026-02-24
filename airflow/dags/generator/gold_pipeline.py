@@ -15,6 +15,10 @@ from airflow.operators.python import PythonOperator
 from jinja2 import Template
 
 
+class _NoTemplatePythonOperator(PythonOperator):
+    template_fields: Tuple[str, ...] = ()
+
+
 def _normalize_ts(value: Any) -> Optional[str]:
     if not value:
         return None
@@ -542,11 +546,12 @@ class GoldPipelineGenerator:
                         pipeline_id,
                     )
                     continue
-                if sql_text:
-                    pipeline["sql_text"] = sql_text
-                elif sql_path:
+                if sql_path:
                     pipeline["sql_path"] = _resolve_sql_path(base_dir, sql_path)
-                task_map[pipeline_id] = PythonOperator(
+                    pipeline.pop("sql_text", None)
+                elif sql_text:
+                    pipeline["sql_text"] = sql_text
+                task_map[pipeline_id] = _NoTemplatePythonOperator(
                     task_id=pipeline_id,
                     python_callable=run_pipeline,
                     op_kwargs={
