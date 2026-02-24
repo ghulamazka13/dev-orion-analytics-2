@@ -357,14 +357,34 @@ def create_backfill(
     end_ts: str = Form(...),
     requested_by: Optional[str] = Form(None),
 ) -> RedirectResponse:
-    _execute(
+    duplicate_rows = _fetch_all(
         """
-        INSERT INTO metadata.backfill_jobs (
-          source_id, start_ts, end_ts, status, requested_by, created_at, updated_at
-        ) VALUES (%s, %s, %s, 'pending', %s, now(), now())
+        SELECT job_id
+        FROM metadata.backfill_jobs
+        WHERE source_id = %s
+          AND start_ts = %s
+          AND end_ts = %s
+          AND status IN ('pending', 'running')
+        LIMIT 1
         """,
-        (int(source_id), start_ts, end_ts, requested_by),
+        (int(source_id), start_ts, end_ts),
     )
+    if duplicate_rows:
+        return RedirectResponse("/?error=duplicate_active_backfill", status_code=303)
+
+    try:
+        _execute(
+            """
+            INSERT INTO metadata.backfill_jobs (
+              source_id, start_ts, end_ts, status, requested_by, created_at, updated_at
+            ) VALUES (%s, %s, %s, 'pending', %s, now(), now())
+            """,
+            (int(source_id), start_ts, end_ts, requested_by),
+        )
+    except psycopg2.Error as exc:
+        if getattr(exc, "diag", None) and getattr(exc.diag, "constraint_name", "") == "uq_backfill_jobs_active_window":
+            return RedirectResponse("/?error=duplicate_active_backfill", status_code=303)
+        return RedirectResponse("/?error=backfill_insert_failed", status_code=303)
     return RedirectResponse("/", status_code=303)
 
 

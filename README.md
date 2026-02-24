@@ -250,6 +250,9 @@ CREATE TABLE IF NOT EXISTS metadata.worker_heartbeats (
   status TEXT NOT NULL DEFAULT 'ok',
   details JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_backfill_jobs_active_window
+  ON metadata.backfill_jobs (source_id, start_ts, end_ts)
+  WHERE status IN ('pending', 'running');
 ```
 
 ### 1) Create a project
@@ -357,8 +360,11 @@ docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_
 ```
 
 Duplicate handling:
-- The parser SQL skips rows whose `event.hash` already exists in target parsed tables (`bronze.suricata_events_raw`, `bronze.wazuh_events_raw`, `bronze.zeek_events_raw`).
-- This applies to both MV ingestion and parser backfill generated from `05_raw_table_ingest.sql.tmpl`.
+- OpenSearch puller deduplicates inserts by key `(source_id, index_name, event_id, event_ts)` before writing to raw target tables.
+- Bronze parser materialized views (`05_raw_table_ingest.sql.tmpl`) use anti-join to skip rows already present in target parsed tables.
+- Bronze parser backfill (`05_raw_table_backfill.sh`) reuses the same anti-join logic, so rerun is idempotent for existing keys.
+- Gold SQL pipelines keep idempotent guards (`LEFT JOIN target existing ... WHERE existing IS NULL`) on fact/bridge loads.
+- Backfill queue prevents duplicate active windows per source using unique index `uq_backfill_jobs_active_window`.
 
 Optional (override source tables for one run):
 
@@ -373,7 +379,7 @@ Backfill order (recommended):
 3) If raw historical data was loaded before the parser MVs existed, run:
    - `05_raw_table_backfill.sh` to fill parsed bronze tables from existing raw rows.
    - This is one-time per historical window/source.
-   - It is append-only; rerun can create duplicates unless you clear target partitions/ranges first.
+   - It is idempotent by key (`event_id`, `event_ts`) due anti-join guards in parser SQL.
    Parsed tables:
    - `bronze.suricata_events_raw`
    - `bronze.wazuh_events_raw`

@@ -227,6 +227,10 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_state_status
 CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status
   ON metadata.backfill_jobs (status);
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_backfill_jobs_active_window
+  ON metadata.backfill_jobs (source_id, start_ts, end_ts)
+  WHERE status IN ('pending', 'running');
+
 CREATE INDEX IF NOT EXISTS idx_file_export_jobs_status
   ON metadata.file_export_jobs (status);
 

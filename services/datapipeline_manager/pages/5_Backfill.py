@@ -41,22 +41,52 @@ with st.form("create_backfill"):
             if end_ts <= start_ts:
                 st.error("End timestamp must be after start timestamp.")
             else:
-                db.execute(
+                existing = db.fetch_one(
                     """
-                    INSERT INTO metadata.backfill_jobs (
-                      source_id, start_ts, end_ts, status, requested_by, created_at, updated_at, throttle_seconds
-                    ) VALUES (%s, %s, %s, 'pending', %s, now(), now(), %s)
+                    SELECT count(*) AS count
+                    FROM metadata.backfill_jobs
+                    WHERE source_id = %s
+                      AND start_ts = %s
+                      AND end_ts = %s
+                      AND status IN ('pending', 'running')
                     """,
                     (
                         source_map[source_label],
                         start_ts.isoformat(),
                         end_ts.isoformat(),
-                        requested_by,
-                        int(throttle),
                     ),
                 )
-                ui.notify("Backfill job queued.")
-                st.rerun()
+                if existing and int(existing.get("count", 0)) > 0:
+                    st.error(
+                        "Backfill window yang sama untuk source ini sudah ada "
+                        "(status pending/running)."
+                    )
+                    st.stop()
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO metadata.backfill_jobs (
+                          source_id, start_ts, end_ts, status, requested_by, created_at, updated_at, throttle_seconds
+                        ) VALUES (%s, %s, %s, 'pending', %s, now(), now(), %s)
+                        """,
+                        (
+                            source_map[source_label],
+                            start_ts.isoformat(),
+                            end_ts.isoformat(),
+                            requested_by,
+                            int(throttle),
+                        ),
+                    )
+                    ui.notify("Backfill job queued.")
+                    st.rerun()
+                except Exception as exc:
+                    if "uq_backfill_jobs_active_window" in str(exc):
+                        st.error(
+                            "Backfill window yang sama untuk source ini sudah ada "
+                            "(status pending/running)."
+                        )
+                    else:
+                        st.error(f"Create backfill failed: {exc}")
 
 st.markdown("### Backfill Jobs")
 status_filter = st.selectbox(

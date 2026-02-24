@@ -5,7 +5,9 @@ DROP TABLE IF EXISTS bronze.zeek_events_mv;
 CREATE MATERIALIZED VIEW bronze.suricata_events_mv
 TO bronze.suricata_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
@@ -81,12 +83,19 @@ SELECT
   raw AS raw_data
 FROM {{RAW_SOURCE_FROM}}
 WHERE JSONHas(raw, 'suricata')
-  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != ''
+) src
+LEFT JOIN bronze.suricata_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;
 
 CREATE MATERIALIZED VIEW bronze.wazuh_events_mv
 TO bronze.wazuh_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
@@ -126,12 +135,19 @@ SELECT
   raw AS raw_data
 FROM {{RAW_SOURCE_FROM}}
 WHERE JSON_VALUE(raw, '$.event.provider') = 'wazuh'
-  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != ''
+) src
+LEFT JOIN bronze.wazuh_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;
 
 CREATE MATERIALIZED VIEW bronze.zeek_events_mv
 TO bronze.zeek_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) AS event_id,
   toTimeZone(
     coalesce(
@@ -264,4 +280,9 @@ SELECT
   raw AS raw_data
 FROM {{RAW_SOURCE_FROM}}
 WHERE (JSONHas(raw, 'zeek') OR JSON_VALUE(raw, '$.event.module') = 'zeek' OR JSON_VALUE(raw, '$.event.provider') IN ('zeek','arkime'))
-  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != '';
+  AND coalesce(nullIf(JSON_VALUE(raw, '$.event.hash'), ''), lower(hex(MD5(raw)))) != ''
+) src
+LEFT JOIN bronze.zeek_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;

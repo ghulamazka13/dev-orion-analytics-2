@@ -461,7 +461,7 @@ class ClickHouseWriter:
             )
             ENGINE = MergeTree
             PARTITION BY toDate(event_ts)
-            ORDER BY (source_id, toDate(event_ts), event_ts, event_id)
+            ORDER BY (source_id, index_name, toDate(event_ts), event_ts, event_id)
             """
         )
         self.execute_sql(
@@ -478,7 +478,22 @@ class ClickHouseWriter:
     def insert_rows(self, database: str, table: str, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
-        sql = f"INSERT INTO {quote_identifier(database)}.{quote_identifier(table)} FORMAT JSONEachRow"
+        sql = (
+            f"INSERT INTO {quote_identifier(database)}.{quote_identifier(table)} "
+            "SELECT incoming.event_id, incoming.event_ts, incoming.index_name, incoming.source_id, "
+            "incoming.raw, incoming.raw_hit, incoming.ingested_at, incoming.extras "
+            "FROM input("
+            "'event_id String, event_ts DateTime64(3), index_name String, source_id String, "
+            "raw String, raw_hit String, ingested_at DateTime64(3), extras Map(String, String)'"
+            ") AS incoming "
+            f"LEFT JOIN {quote_identifier(database)}.{quote_identifier(table)} AS existing "
+            "ON existing.source_id = incoming.source_id "
+            "AND existing.index_name = incoming.index_name "
+            "AND existing.event_id = incoming.event_id "
+            "AND existing.event_ts = incoming.event_ts "
+            "WHERE existing.event_id IS NULL "
+            "FORMAT JSONEachRow"
+        )
         payload = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows)
         response = self.session.post(
             f"{self.base_url}/",
@@ -840,13 +855,18 @@ def _build_rows(
 ) -> List[Dict[str, Any]]:
     ingested_at = format_timestamp_ch(datetime.now(timezone.utc))
     rows: List[Dict[str, Any]] = []
+    seen_keys: set[Tuple[str, str, str, str]] = set()
     for hit in hits:
         source = hit.get("_source") or {}
         event_ts = _extract_event_ts(hit, time_field)
         if not event_ts:
             logging.warning("Skipping hit without parsable %s timestamp", time_field)
             continue
-        event_id = hit.get("_id") or source.get("event_id") or ""
+        event_id = hit.get("_id") or source.get("event_id")
+        if not event_id:
+            event_id = hashlib.md5(
+                json.dumps(source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
         index_name = str(hit.get("_index") or "")
         metadata = {
             "_index": index_name,
@@ -855,20 +875,28 @@ def _build_rows(
             value = hit.get(key)
             if value is not None:
                 metadata[key] = str(value)
-        rows.append(
-            {
-                "event_id": str(event_id),
-                "event_ts": format_timestamp_ch(event_ts),
-                "index_name": index_name,
-                "source_id": str(source_id),
-                # Keep raw as _source-only payload for existing parser mappings.
-                "raw": json.dumps(source, separators=(",", ":")),
-                # Store complete OpenSearch hit for troubleshooting/replay parity.
-                "raw_hit": json.dumps(hit, separators=(",", ":")),
-                "ingested_at": ingested_at,
-                "extras": metadata,
-            }
+        row = {
+            "event_id": str(event_id),
+            "event_ts": format_timestamp_ch(event_ts),
+            "index_name": index_name,
+            "source_id": str(source_id),
+            # Keep raw as _source-only payload for existing parser mappings.
+            "raw": json.dumps(source, separators=(",", ":")),
+            # Store complete OpenSearch hit for troubleshooting/replay parity.
+            "raw_hit": json.dumps(hit, separators=(",", ":")),
+            "ingested_at": ingested_at,
+            "extras": metadata,
+        }
+        dedupe_key = (
+            row["source_id"],
+            row["index_name"],
+            row["event_id"],
+            row["event_ts"],
         )
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        rows.append(row)
     return rows
 
 

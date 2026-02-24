@@ -13,7 +13,9 @@ SETTINGS
 CREATE MATERIALIZED VIEW IF NOT EXISTS bronze.suricata_events_mv
 TO bronze.suricata_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
@@ -89,12 +91,19 @@ SELECT
   raw AS raw_data
 FROM bronze.security_events_kafka
 WHERE JSONHas(raw, 'suricata')
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+  AND JSON_VALUE(raw, '$.event.hash') != ''
+) src
+LEFT JOIN bronze.suricata_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS bronze.wazuh_events_mv
 TO bronze.wazuh_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
@@ -134,12 +143,19 @@ SELECT
   raw AS raw_data
 FROM bronze.security_events_kafka
 WHERE JSON_VALUE(raw, '$.event.provider') = 'wazuh'
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+  AND JSON_VALUE(raw, '$.event.hash') != ''
+) src
+LEFT JOIN bronze.wazuh_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS bronze.zeek_events_mv
 TO bronze.zeek_events_raw
 AS
-SELECT
+SELECT src.*
+FROM (
+SELECT DISTINCT
   JSON_VALUE(raw, '$.event.hash') AS event_id,
   toTimeZone(
     coalesce(
@@ -272,4 +288,9 @@ SELECT
   raw AS raw_data
 FROM bronze.security_events_kafka
 WHERE JSONHas(raw, 'zeek')
-  AND JSON_VALUE(raw, '$.event.hash') != '';
+  AND JSON_VALUE(raw, '$.event.hash') != ''
+) src
+LEFT JOIN bronze.zeek_events_raw existing
+  ON existing.event_id = src.event_id
+  AND existing.event_ts = src.event_ts
+WHERE existing.event_id IS NULL;
