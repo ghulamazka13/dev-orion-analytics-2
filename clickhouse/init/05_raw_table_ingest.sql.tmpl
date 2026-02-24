@@ -296,6 +296,14 @@ SELECT DISTINCT
     toUInt8(0),
     toUInt8OrNull(JSON_VALUE(raw, '$.zeek.dns.auth'))
   ) AS dns_auth,
+  multiIf(
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.ssh.auth_success'), '')) = 'true',
+    toUInt8(1),
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.ssh.auth_success'), '')) = 'false',
+    toUInt8(0),
+    toUInt8OrNull(JSON_VALUE(raw, '$.zeek.ssh.auth_success'))
+  ) AS ssh_auth_success,
+  toInt32OrNull(JSON_VALUE(raw, '$.zeek.ssh.auth_attempts')) AS ssh_auth_attempts,
   JSON_VALUE(raw, '$.zeek.http.method') AS http_method,
   coalesce(
     JSON_VALUE(raw, '$.zeek.http.uri'),
