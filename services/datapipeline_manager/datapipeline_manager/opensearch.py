@@ -1,4 +1,6 @@
-from typing import Dict, List, Optional, Tuple
+import fnmatch
+import re
+from typing import Iterable, List, Optional, Tuple
 
 import requests
 
@@ -17,12 +19,36 @@ def _build_session(auth_type: Optional[str], username: Optional[str], secret: Op
     return session
 
 
+def _parse_exclude_patterns(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    parts = re.split(r"[,\r\n;]+", str(value))
+    return [item.strip() for item in parts if item and item.strip()]
+
+
+def _is_index_excluded(index_name: str, exclude_patterns: Iterable[str]) -> bool:
+    index_lower = (index_name or "").strip().lower()
+    if not index_lower:
+        return False
+    for raw_pattern in exclude_patterns:
+        pattern = (raw_pattern or "").strip().lower()
+        if not pattern:
+            continue
+        if any(char in pattern for char in "*?[]"):
+            if fnmatch.fnmatchcase(index_lower, pattern):
+                return True
+        elif pattern in index_lower:
+            return True
+    return False
+
+
 def test_connection(
     base_url: str,
     index_pattern: str,
     auth_type: Optional[str],
     username: Optional[str],
     secret: Optional[str],
+    exclude_index_patterns: Optional[str] = None,
     timeout: int = 15,
 ) -> Tuple[bool, str, List[str]]:
     session = _build_session(auth_type, username, secret)
@@ -37,15 +63,24 @@ def test_connection(
         if response.status_code == 404:
             return False, "No indices matched the pattern.", []
         response.raise_for_status()
+        exclude_patterns = _parse_exclude_patterns(exclude_index_patterns)
         indices = []
+        excluded_count = 0
         for row in response.json():
             if row.get("status") == "close":
                 continue
             index_name = row.get("index")
             if index_name:
+                if _is_index_excluded(str(index_name), exclude_patterns):
+                    excluded_count += 1
+                    continue
                 indices.append(index_name)
         if not indices:
+            if excluded_count > 0:
+                return False, f"No open indices left after excluding {excluded_count} index(es).", []
             return False, "No open indices found.", []
+        if excluded_count > 0:
+            return True, f"Found {len(indices)} indices ({excluded_count} excluded).", indices
         return True, f"Found {len(indices)} indices.", indices
     except requests.RequestException as exc:
         return False, f"Connection failed: {exc}", []

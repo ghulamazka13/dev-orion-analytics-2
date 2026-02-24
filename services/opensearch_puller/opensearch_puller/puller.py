@@ -1,4 +1,5 @@
 import base64
+import fnmatch
 import hashlib
 import json
 import logging
@@ -25,6 +26,29 @@ from .utils import (
 
 _NON_IDENT_RE = re.compile(r"[^A-Za-z0-9_]+")
 _MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def _parse_exclude_patterns(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    parts = re.split(r"[,\r\n;]+", str(value))
+    return [item.strip() for item in parts if item and item.strip()]
+
+
+def _is_index_excluded(index_name: str, exclude_patterns: List[str]) -> bool:
+    index_lower = (index_name or "").strip().lower()
+    if not index_lower:
+        return False
+    for raw_pattern in exclude_patterns:
+        pattern = (raw_pattern or "").strip().lower()
+        if not pattern:
+            continue
+        if any(char in pattern for char in "*?[]"):
+            if fnmatch.fnmatchcase(index_lower, pattern):
+                return True
+        elif pattern in index_lower:
+            return True
+    return False
 
 
 def _normalize_identifier_token(value: Optional[str]) -> str:
@@ -85,6 +109,7 @@ class PgStore:
                              NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                            ) AS target_ready,
                            s.query_filter_json,
+                           COALESCE(to_jsonb(s)->>'exclude_index_patterns', '') AS exclude_index_patterns,
                            s.enabled,
                            p.timezone
                     FROM metadata.opensearch_sources s
@@ -122,6 +147,7 @@ class PgStore:
                                  NULLIF(btrim(s.target_table_name), '') IS NOT NULL
                                ) AS target_ready,
                                s.query_filter_json,
+                               COALESCE(to_jsonb(s)->>'exclude_index_patterns', '') AS exclude_index_patterns,
                                s.enabled,
                                p.timezone
                         FROM metadata.opensearch_sources s
@@ -158,6 +184,7 @@ class PgStore:
                                NULL::text AS target_table_name,
                                FALSE AS target_ready,
                                s.query_filter_json,
+                               COALESCE(to_jsonb(s)->>'exclude_index_patterns', '') AS exclude_index_patterns,
                                s.enabled,
                                p.timezone
                         FROM metadata.opensearch_sources s
@@ -576,7 +603,7 @@ class OpenSearchClient:
                 time.sleep(sleep_for)
         raise RuntimeError("OpenSearch request retries exhausted")
 
-    def list_indices(self, index_pattern: str) -> List[str]:
+    def list_indices(self, index_pattern: str, exclude_patterns_raw: Optional[str] = None) -> List[str]:
         try:
             response = self._request(
                 "GET",
@@ -588,13 +615,24 @@ class OpenSearchClient:
                 logging.warning("No indices found for pattern %s", index_pattern)
                 return []
             raise
+        exclude_patterns = _parse_exclude_patterns(exclude_patterns_raw)
         indices = []
+        excluded_count = 0
         for row in response.json():
             if row.get("status") == "close":
                 continue
             index_name = row.get("index")
             if index_name:
+                if _is_index_excluded(str(index_name), exclude_patterns):
+                    excluded_count += 1
+                    continue
                 indices.append(index_name)
+        if excluded_count:
+            logging.info(
+                "Filtered out %s indices for pattern %s using exclude patterns",
+                excluded_count,
+                index_pattern,
+            )
         return sorted(set(indices))
 
     def open_pit(self, index_name: str) -> str:
@@ -1071,7 +1109,7 @@ def _process_backfill(
     if job["status"] == "pending":
         store.set_backfill_status(job_id, "running")
 
-    indices = os_client.list_indices(source["index_pattern"])
+    indices = os_client.list_indices(source["index_pattern"], source.get("exclude_index_patterns"))
     if not indices:
         store.set_backfill_status(job_id, "completed")
         store.update_backfill_checkpoint(job_id, None, None, None, None)
@@ -1130,7 +1168,7 @@ def _process_incremental(
     os_client: OpenSearchClient,
     source: Dict[str, Any],
 ) -> None:
-    indices = os_client.list_indices(source["index_pattern"])
+    indices = os_client.list_indices(source["index_pattern"], source.get("exclude_index_patterns"))
     if not indices:
         return
 

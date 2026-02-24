@@ -46,7 +46,24 @@ def _has_target_routing_columns() -> bool:
         return False
 
 
+def _has_exclude_index_patterns_column() -> bool:
+    try:
+        row = db.fetch_one(
+            """
+            SELECT count(*) AS count
+            FROM information_schema.columns
+            WHERE table_schema = 'metadata'
+              AND table_name = 'opensearch_sources'
+              AND column_name = 'exclude_index_patterns'
+            """
+        )
+        return bool(row and int(row.get("count", 0)) == 1)
+    except Exception:
+        return False
+
+
 HAS_TARGET_ROUTING = _has_target_routing_columns()
+HAS_EXCLUDE_INDEX_PATTERNS = _has_exclude_index_patterns_column()
 
 
 projects = db.fetch_all(
@@ -54,21 +71,27 @@ projects = db.fetch_all(
 )
 project_ids = [row["project_id"] for row in projects]
 
+exclude_select_sql = (
+    "exclude_index_patterns"
+    if HAS_EXCLUDE_INDEX_PATTERNS
+    else "NULL::text AS exclude_index_patterns"
+)
+
 if HAS_TARGET_ROUTING:
     sources = db.fetch_all(
-        """
+        f"""
         SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
                index_pattern, time_field, target_dataset, target_table_name,
-               query_filter_json, enabled, created_at, updated_at
+               query_filter_json, {exclude_select_sql}, enabled, created_at, updated_at
         FROM metadata.opensearch_sources
         ORDER BY source_id
         """
     )
 else:
     sources = db.fetch_all(
-        """
+        f"""
         SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
-               index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
+               index_pattern, time_field, query_filter_json, {exclude_select_sql}, enabled, created_at, updated_at
         FROM metadata.opensearch_sources
         ORDER BY source_id
         """
@@ -144,6 +167,21 @@ with tabs[0]:
             index_pattern = st.text_input(
                 "Index Pattern", value=current["index_pattern"] if current else ""
             )
+            if HAS_EXCLUDE_INDEX_PATTERNS:
+                exclude_index_patterns = st.text_input(
+                    "Exclude Index Patterns",
+                    value=(current.get("exclude_index_patterns") if current else "") or "",
+                    help=(
+                        "Comma/newline separated. Supports wildcard (*, ?, []), "
+                        "or plain token (contains match). Example: *-new-shrunk*"
+                    ),
+                )
+            else:
+                exclude_index_patterns = ""
+                st.caption(
+                    "Exclude Index Patterns is unavailable until metadata migration adds "
+                    "`opensearch_sources.exclude_index_patterns`."
+                )
             time_field = st.text_input(
                 "Time Field", value=current["time_field"] if current else "@timestamp"
             )
@@ -185,6 +223,7 @@ with tabs[0]:
                 auth_type=None if auth_type == "none" else auth_type,
                 username=username,
                 secret=secret_value,
+                exclude_index_patterns=exclude_index_patterns,
             )
             if ok:
                 ui.notify(message, "success")
@@ -208,6 +247,7 @@ with tabs[0]:
         else:
             secret_ref_value = None
             secret_enc_value = None
+            exclude_patterns_value = (exclude_index_patterns or "").strip() or None
             if auth_type != "none":
                 if secret_mode == "secret_ref":
                     secret_ref_value = secret_ref
@@ -222,8 +262,7 @@ with tabs[0]:
             )
             try:
                 if current:
-                    rowcount = db.execute(
-                        """
+                    update_sql = """
                         UPDATE metadata.opensearch_sources
                         SET project_id = %s,
                             name = %s,
@@ -234,54 +273,73 @@ with tabs[0]:
                             secret_enc = %s,
                             index_pattern = %s,
                             time_field = %s,
+                    """
+                    update_params = [
+                        project_id,
+                        name,
+                        base_url,
+                        None if auth_type == "none" else auth_type,
+                        username,
+                        secret_ref_value,
+                        secret_enc_param,
+                        index_pattern,
+                        time_field,
+                    ]
+                    if HAS_EXCLUDE_INDEX_PATTERNS:
+                        update_sql += "                            exclude_index_patterns = %s,\n"
+                        update_params.append(exclude_patterns_value)
+                    update_sql += """
                             query_filter_json = %s,
                             enabled = %s,
                             updated_at = now()
                         WHERE source_id = %s
                           AND updated_at = %s
-                        """,
-                        (
-                            project_id,
-                            name,
-                            base_url,
-                            None if auth_type == "none" else auth_type,
-                            username,
-                            secret_ref_value,
-                            secret_enc_param,
-                            index_pattern,
-                            time_field,
+                    """
+                    update_params.extend(
+                        [
                             json.dumps(query_filter),
                             enabled,
                             current["source_id"],
                             current["updated_at"],
-                        ),
+                        ]
                     )
+                    rowcount = db.execute(update_sql, tuple(update_params))
                     if rowcount == 0:
                         st.error("Update conflict: source was modified by another user.")
                     else:
                         ui.notify("Source updated.")
                         st.rerun()
                 else:
+                    insert_columns = (
+                        "project_id, name, base_url, auth_type, username, secret_ref, "
+                        "secret_enc, index_pattern, time_field"
+                    )
+                    insert_values = "%s, %s, %s, %s, %s, %s, %s, %s, %s"
+                    insert_params = [
+                        project_id,
+                        name,
+                        base_url,
+                        None if auth_type == "none" else auth_type,
+                        username,
+                        secret_ref_value,
+                        secret_enc_param,
+                        index_pattern,
+                        time_field,
+                    ]
+                    if HAS_EXCLUDE_INDEX_PATTERNS:
+                        insert_columns += ", exclude_index_patterns"
+                        insert_values += ", %s"
+                        insert_params.append(exclude_patterns_value)
+                    insert_columns += ", query_filter_json, enabled, created_at, updated_at"
+                    insert_values += ", %s, %s, now(), now()"
+                    insert_params.extend([json.dumps(query_filter), enabled])
                     db.execute(
-                        """
+                        f"""
                         INSERT INTO metadata.opensearch_sources (
-                          project_id, name, base_url, auth_type, username, secret_ref,
-                          secret_enc, index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                          {insert_columns}
+                        ) VALUES ({insert_values})
                         """,
-                        (
-                            project_id,
-                            name,
-                            base_url,
-                            None if auth_type == "none" else auth_type,
-                            username,
-                            secret_ref_value,
-                            secret_enc_param,
-                            index_pattern,
-                            time_field,
-                            json.dumps(query_filter),
-                            enabled,
-                        ),
+                        tuple(insert_params),
                     )
                     ui.notify("Source created.")
                     st.rerun()
@@ -356,6 +414,7 @@ with tabs[1]:
                     auth_type=current.get("auth_type"),
                     username=current.get("username"),
                     secret=secret_value,
+                    exclude_index_patterns=current.get("exclude_index_patterns"),
                 )
                 if ok:
                     ui.notify(message, "success")

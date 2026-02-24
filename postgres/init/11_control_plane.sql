@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS metadata.opensearch_sources (
   secret_ref TEXT,
   secret_enc BYTEA,
   index_pattern TEXT NOT NULL,
+  exclude_index_patterns TEXT,
   time_field TEXT NOT NULL,
   target_dataset TEXT,
   target_table_name TEXT,
@@ -194,7 +195,8 @@ CREATE TABLE IF NOT EXISTS metadata.bronze_event_fields (
 
 ALTER TABLE IF EXISTS metadata.opensearch_sources
   ADD COLUMN IF NOT EXISTS target_dataset TEXT,
-  ADD COLUMN IF NOT EXISTS target_table_name TEXT;
+  ADD COLUMN IF NOT EXISTS target_table_name TEXT,
+  ADD COLUMN IF NOT EXISTS exclude_index_patterns TEXT;
 
 ALTER TABLE IF EXISTS metadata.projects
   ADD COLUMN IF NOT EXISTS clickhouse_namespace TEXT;

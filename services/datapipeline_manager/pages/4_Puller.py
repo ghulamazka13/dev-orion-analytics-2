@@ -144,20 +144,24 @@ project_db = {
 if HAS_TARGET_ROUTING:
     sources = db.fetch_all(
         """
-        SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
-               index_pattern, time_field, target_dataset, target_table_name,
-               query_filter_json, enabled, created_at, updated_at
-        FROM metadata.opensearch_sources
-        ORDER BY source_id
+        SELECT s.source_id, s.project_id, s.name, s.base_url, s.auth_type, s.username, s.secret_ref, s.secret_enc,
+               s.index_pattern, s.time_field, s.target_dataset, s.target_table_name,
+               s.query_filter_json,
+               COALESCE(to_jsonb(s)->>'exclude_index_patterns', '') AS exclude_index_patterns,
+               s.enabled, s.created_at, s.updated_at
+        FROM metadata.opensearch_sources s
+        ORDER BY s.source_id
         """
     )
 else:
     sources = db.fetch_all(
         """
-        SELECT source_id, project_id, name, base_url, auth_type, username, secret_ref, secret_enc,
-               index_pattern, time_field, query_filter_json, enabled, created_at, updated_at
-        FROM metadata.opensearch_sources
-        ORDER BY source_id
+        SELECT s.source_id, s.project_id, s.name, s.base_url, s.auth_type, s.username, s.secret_ref, s.secret_enc,
+               s.index_pattern, s.time_field, s.query_filter_json,
+               COALESCE(to_jsonb(s)->>'exclude_index_patterns', '') AS exclude_index_patterns,
+               s.enabled, s.created_at, s.updated_at
+        FROM metadata.opensearch_sources s
+        ORDER BY s.source_id
         """
     )
     for row in sources:
@@ -218,6 +222,7 @@ with tabs[0]:
                 auth_type=selected_row.get("auth_type"),
                 username=selected_row.get("username"),
                 secret=secret_value,
+                exclude_index_patterns=selected_row.get("exclude_index_patterns"),
             )
             if ok:
                 ui.notify(message, "success")
