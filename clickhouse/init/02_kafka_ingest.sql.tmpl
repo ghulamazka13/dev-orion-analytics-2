@@ -312,6 +312,19 @@ SELECT DISTINCT
     toUInt8OrNull(JSON_VALUE(raw, '$.zeek.ssh.auth_success'))
   ) AS ssh_auth_success,
   toInt32OrNull(JSON_VALUE(raw, '$.zeek.ssh.auth_attempts')) AS ssh_auth_attempts,
+  JSON_VALUE(raw, '$.zeek.ssl.cipher') AS ssl_cipher,
+  JSON_VALUE(raw, '$.zeek.ssl.curve') AS ssl_curve,
+  multiIf(
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.ssl.established'), '')) = 'true',
+    toUInt8(1),
+    lower(nullIf(JSON_VALUE(raw, '$.zeek.ssl.established'), '')) = 'false',
+    toUInt8(0),
+    toUInt8OrNull(JSON_VALUE(raw, '$.zeek.ssl.established'))
+  ) AS ssl_established,
+  ifNull(
+    JSONExtract(raw, 'zeek', 'ssl', 'cert_chain_fps', 'Array(String)'),
+    []
+  ) AS ssl_cert_chain_fps,
   JSON_VALUE(raw, '$.zeek.http.method') AS http_method,
   coalesce(
     JSON_VALUE(raw, '$.zeek.http.uri'),
