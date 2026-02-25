@@ -1,5 +1,6 @@
 import re
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -120,6 +121,144 @@ def _clickhouse_database_exists(database_name: str) -> bool:
     return bool(rows and int(rows[0].get("count", 0)) > 0)
 
 
+_TABLE_REF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def _parse_table_ref(value: str) -> Optional[Tuple[str, str]]:
+    candidate = (value or "").strip().lower()
+    match = _TABLE_REF_RE.match(candidate)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _collect_table_refs(selected: List[str], manual_text: str) -> Tuple[List[str], List[str]]:
+    refs: List[str] = []
+    invalid: List[str] = []
+
+    tokens: List[str] = []
+    tokens.extend(selected or [])
+    tokens.extend(part.strip() for part in re.split(r"[\r\n,]+", manual_text or ""))
+
+    for token in tokens:
+        if not token:
+            continue
+        parsed = _parse_table_ref(token)
+        if not parsed:
+            if token not in invalid:
+                invalid.append(token)
+            continue
+        ref = f"{parsed[0]}.{parsed[1]}"
+        if ref not in refs:
+            refs.append(ref)
+    return refs, invalid
+
+
+def _clickhouse_table_exists(table_ref: str) -> bool:
+    parsed = _parse_table_ref(table_ref)
+    if not parsed:
+        return False
+    database, table = parsed
+    rows = clickhouse.query_rows(
+        f"""
+        SELECT count() AS count
+        FROM system.tables
+        WHERE database = '{database}'
+          AND name = '{table}'
+        """
+    )
+    return bool(rows and int(rows[0].get("count", 0)) > 0)
+
+
+def _build_raw_source_from(table_refs: List[str]) -> str:
+    parsed_refs = [_parse_table_ref(item) for item in table_refs]
+    safe_refs = [item for item in parsed_refs if item]
+    if len(safe_refs) == 1:
+        database, table = safe_refs[0]
+        return f"`{database}`.`{table}`"
+
+    unions: List[str] = []
+    for database, table in safe_refs:
+        unions.append(
+            f"SELECT event_id, event_ts, raw, ingested_at FROM `{database}`.`{table}`"
+        )
+    return f"({' UNION ALL '.join(unions)})"
+
+
+def _resolve_parser_template_path() -> Optional[Path]:
+    candidates: List[Path] = []
+    here = Path(__file__).resolve()
+    try:
+        candidates.append(here.parents[3] / "clickhouse" / "init" / "05_raw_table_ingest.sql.tmpl")
+    except IndexError:
+        pass
+    candidates.append(Path("/app/clickhouse/init/05_raw_table_ingest.sql.tmpl"))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _render_parser_apply_sql(template_sql: str, raw_source_from: str) -> str:
+    return template_sql.replace("{{RAW_SOURCE_FROM}}", raw_source_from)
+
+
+def _render_parser_backfill_sql(template_sql: str, raw_source_from: str) -> str:
+    replaced = template_sql.replace("{{RAW_SOURCE_FROM}}", raw_source_from)
+    output_lines: List[str] = []
+    for line in replaced.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DROP TABLE IF EXISTS bronze.") and stripped.endswith(";"):
+            continue
+        if stripped == "CREATE MATERIALIZED VIEW bronze.suricata_events_mv":
+            output_lines.append("INSERT INTO bronze.suricata_events_raw")
+            continue
+        if stripped == "CREATE MATERIALIZED VIEW bronze.wazuh_events_mv":
+            output_lines.append("INSERT INTO bronze.wazuh_events_raw")
+            continue
+        if stripped == "CREATE MATERIALIZED VIEW bronze.zeek_events_mv":
+            output_lines.append("INSERT INTO bronze.zeek_events_raw")
+            continue
+        if stripped in {
+            "TO bronze.suricata_events_raw",
+            "TO bronze.wazuh_events_raw",
+            "TO bronze.zeek_events_raw",
+            "AS",
+        }:
+            continue
+        output_lines.append(line)
+    return "\n".join(output_lines)
+
+
+def _split_sql_statements(sql_text: str) -> List[str]:
+    statements: List[str] = []
+    for chunk in sql_text.split(";"):
+        statement = chunk.strip()
+        if statement:
+            statements.append(statement)
+    return statements
+
+
+def _execute_clickhouse_script(sql_text: str, timeout: int = 120) -> None:
+    for statement in _split_sql_statements(sql_text):
+        clickhouse.execute_sql(statement, timeout=timeout)
+
+
+def _default_raw_source_options(source_rows: List[dict]) -> List[str]:
+    options: List[str] = []
+    for row in source_rows:
+        dataset = str(row.get("target_dataset") or "").strip().lower()
+        table = str(row.get("target_table_name") or "").strip().lower()
+        if not dataset or not table:
+            continue
+        if not _is_safe_identifier(dataset) or not _is_safe_identifier(table):
+            continue
+        ref = f"{dataset}.{table}"
+        if ref not in options:
+            options.append(ref)
+    return options
+
+
 HAS_TARGET_ROUTING = _has_target_routing_columns()
 
 
@@ -169,7 +308,7 @@ else:
         row["target_table_name"] = None
 
 
-tabs = st.tabs(["Source Routing", "Puller Config", "Monitoring"])
+tabs = st.tabs(["Source Routing", "Puller Config", "Monitoring", "Parser Runner"])
 
 with tabs[0]:
     st.markdown("### Source Routing")
@@ -662,3 +801,84 @@ with tabs[2]:
                     st.caption(f"Tables scanned: {', '.join(scanned_tables)}")
             except Exception as exc:
                 st.error(f"ClickHouse query failed: {exc}")
+
+with tabs[3]:
+    st.markdown("### Raw Parser Runner")
+    st.caption(
+        "Run raw-table parser apply/backfill from UI (equivalent to "
+        "`05_raw_table_ingest.sh` and `05_raw_table_backfill.sh`)."
+    )
+
+    template_path = _resolve_parser_template_path()
+    if not template_path:
+        st.error(
+            "Parser template file `05_raw_table_ingest.sql.tmpl` tidak ditemukan di container UI. "
+            "Rebuild image `itsec-datapipeline-manager` setelah update terakhir."
+        )
+    else:
+        default_options = _default_raw_source_options(sources)
+        selected_tables = st.multiselect(
+            "Raw Source Tables",
+            options=default_options,
+            default=default_options,
+            help="Ambil dari destination source puller yang sudah terdaftar di metadata.",
+            key="puller_parser_selected_tables",
+        )
+        manual_tables = st.text_area(
+            "Additional Raw Source Tables (comma/newline separated, format db.table)",
+            value="",
+            height=80,
+            key="puller_parser_manual_tables",
+        )
+
+        requested_tables, invalid_tables = _collect_table_refs(selected_tables, manual_tables)
+        if invalid_tables:
+            st.error(
+                "Format table tidak valid: "
+                + ", ".join(invalid_tables)
+                + ". Gunakan format `database.table` (alphanumeric + underscore)."
+            )
+        elif not requested_tables:
+            st.info("Pilih minimal satu raw source table.")
+        else:
+            existing_tables: List[str] = []
+            missing_tables: List[str] = []
+            for table_ref in requested_tables:
+                if _clickhouse_table_exists(table_ref):
+                    existing_tables.append(table_ref)
+                else:
+                    missing_tables.append(table_ref)
+
+            if missing_tables:
+                st.warning(
+                    "Table berikut tidak ditemukan di ClickHouse dan akan dilewati: "
+                    + ", ".join(missing_tables)
+                )
+            if not existing_tables:
+                st.error("Tidak ada source table yang valid/tersedia.")
+            else:
+                st.caption("Source tables yang dipakai: " + ", ".join(existing_tables))
+
+                raw_source_from = _build_raw_source_from(existing_tables)
+                with st.expander("Preview RAW_SOURCE_FROM expression"):
+                    st.code(raw_source_from, language="sql")
+
+                col_apply, col_backfill = st.columns(2)
+                apply_clicked = col_apply.button("Apply Parser Views", key="puller_parser_apply")
+                backfill_clicked = col_backfill.button("Run Parser Backfill", key="puller_parser_backfill")
+
+                if apply_clicked or backfill_clicked:
+                    try:
+                        template_sql = template_path.read_text(encoding="utf-8")
+                        if backfill_clicked:
+                            rendered_sql = _render_parser_backfill_sql(template_sql, raw_source_from)
+                            with st.spinner("Running parser backfill..."):
+                                _execute_clickhouse_script(rendered_sql, timeout=300)
+                            ui.notify("Parser backfill completed.")
+                        else:
+                            rendered_sql = _render_parser_apply_sql(template_sql, raw_source_from)
+                            with st.spinner("Applying parser materialized views..."):
+                                _execute_clickhouse_script(rendered_sql, timeout=180)
+                            ui.notify("Parser views applied.")
+                    except Exception as exc:
+                        st.error(f"Parser execution failed: {exc}")

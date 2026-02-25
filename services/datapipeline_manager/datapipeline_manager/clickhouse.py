@@ -21,3 +21,13 @@ def query_json(sql: str, timeout: int = 20) -> Dict[str, Any]:
 def query_rows(sql: str, timeout: int = 20) -> List[Dict[str, Any]]:
     payload = query_json(sql, timeout=timeout)
     return payload.get("data", [])
+
+
+def execute_sql(sql: str, timeout: int = 60) -> str:
+    response = requests.post(
+        CLICKHOUSE_HTTP_URL.rstrip("/") + "/",
+        params={"query": sql},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.text

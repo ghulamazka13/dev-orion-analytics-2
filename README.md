@@ -348,6 +348,11 @@ Manual apply on a running stack:
 docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_ingest.sh
 ```
 
+UI alternative:
+- Open **Data Pipeline Manager -> Puller -> Parser Runner**
+- Select one or more `db.table` raw sources
+- Click **Apply Parser Views**
+
 This creates materialized views that parse events from one or more raw source tables into:
 - `bronze.suricata_events_raw`
 - `bronze.wazuh_events_raw`
@@ -358,6 +363,11 @@ Important: materialized views process only new inserts. For historical rows, run
 ```bash
 docker compose exec -T clickhouse bash /docker-entrypoint-initdb.d/05_raw_table_backfill.sh
 ```
+
+UI alternative:
+- Open **Data Pipeline Manager -> Puller -> Parser Runner**
+- Use the same raw source table selection
+- Click **Run Parser Backfill**
 
 Duplicate handling:
 - OpenSearch puller deduplicates inserts by key `(source_id, index_name, event_id, event_ts)` before writing to raw target tables.
