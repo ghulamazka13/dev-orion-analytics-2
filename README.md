@@ -34,7 +34,7 @@ See `FACT_DIM_ARCHITECTURE.md` for the star schema design.
 docker compose up -d
 ```
 
-If dependencies changed in `requirements.txt`, rebuild images so Docker installs the new libs automatically:
+If dependencies changed in `services/*/requirements.txt`, rebuild images so Docker installs the new libs automatically:
 
 ```bash
 docker compose up -d --build
@@ -183,7 +183,7 @@ docker compose exec -T postgres psql -U airflow -d airflow -f /docker-entrypoint
 Migrate existing `airflow/dags/sql/*.sql` into Postgres metadata:
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m pip install psycopg2-binary==2.9.9
 ```
 
 Then run:
